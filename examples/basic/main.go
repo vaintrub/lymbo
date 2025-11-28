@@ -18,9 +18,8 @@ import (
 
 func main() {
 	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}))
-	slog.SetDefault(logger)
 
+	logger := setupLogger()
 	settings := lymbo.DefaultSettings().
 		WithExpiration().
 		WithProcessTime(3 * time.Second).
@@ -44,7 +43,6 @@ func main() {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Run kharon in a goroutine
 	go func() {
 		if err := kh.Run(ctx, r); err != nil {
 			slog.ErrorContext(ctx, "kharon failed", "error", err)
@@ -53,87 +51,117 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
-	mux.Handle("GET /ticket/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract ticket ID from URL
-		id := r.PathValue("id")
 
+	mux.Handle("GET /ticket/{id}", handleGetTicket(ctx, kh))
+	mux.Handle("POST /ticket/{id}/cancel", handleCancelTicket(ctx, kh))
+	mux.Handle("DELETE /ticket/{id}", handleDeleteTicket(ctx, kh))
+	mux.Handle("POST /ticket/{type}/{id}", handleCreateTicket(ctx, kh))
+
+	server := &http.Server{
+		Addr:    "127.0.0.1:8080",
+		Handler: mux,
+	}
+
+	runServer(ctx, server, cancel)
+}
+
+func setupLogger() *slog.Logger {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}))
+	slog.SetDefault(logger)
+	return logger
+}
+
+func handleGetTicket(ctx context.Context, kh *lymbo.Kharon) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
 		if id == "" {
 			http.Error(w, "ticket ID is required", http.StatusBadRequest)
 			return
 		}
 
-		// Fetch ticket from store
 		ticket, err := kh.Get(r.Context(), lymbo.TicketId(id))
 		switch err {
 		case nil:
-			// Write ticket details to response
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			err := json.NewEncoder(w).Encode(ticket)
-			if err != nil {
+			if err := json.NewEncoder(w).Encode(ticket); err != nil {
 				slog.ErrorContext(ctx, "failed to encode ticket", "error", err)
 				http.Error(w, "failed to encode ticket", http.StatusInternalServerError)
 			}
-			return
 		case lymbo.ErrTicketNotFound:
 			http.Error(w, "ticket not found", http.StatusNotFound)
-			return
 		default:
 			slog.ErrorContext(ctx, "failed to get ticket", "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
 		}
-	}))
+	}
+}
 
-	// Cancel?
-	mux.Handle("POST /ticket/{id}/cancel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract ticket ID from URL
+func handleCancelTicket(ctx context.Context, kh *lymbo.Kharon) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "" {
 			http.Error(w, "ticket ID is required", http.StatusBadRequest)
 			return
 		}
 
-		// Cancel ticket in store
 		err := kh.Cancel(r.Context(), lymbo.TicketId(id), lymbo.WithErrorReason("cancelled via api"))
 		switch err {
 		case nil:
 			w.WriteHeader(http.StatusNoContent)
-			return
 		case lymbo.ErrTicketNotFound:
 			http.Error(w, "ticket not found", http.StatusNotFound)
-			return
 		default:
 			slog.ErrorContext(ctx, "failed to cancel ticket", "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
 		}
-	}))
+	}
+}
 
-	mux.Handle("DELETE /ticket/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract ticket ID from URL
+func handleDeleteTicket(ctx context.Context, kh *lymbo.Kharon) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "" {
 			http.Error(w, "ticket ID is required", http.StatusBadRequest)
 			return
 		}
 
-		// Delete ticket from store
 		err := kh.Delete(r.Context(), lymbo.TicketId(id))
 		switch err {
 		case nil, lymbo.ErrTicketNotFound:
 			w.WriteHeader(http.StatusNoContent)
-			return
 		default:
 			slog.ErrorContext(ctx, "failed to delete ticket", "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
 		}
-	}))
+	}
+}
 
-	mux.Handle("POST /ticket/{type}/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// ?nice={nice}&delay={delay}
-		// Extract ticket ID from URL
+func parseTicketParams(r *http.Request) (nice *int, delay *float64, err error) {
+	if n := r.URL.Query().Get("nice"); n != "" {
+		nx, err := strconv.Atoi(n)
+		if err != nil {
+			return nil, nil, err
+		}
+		nice = &nx
+	}
+
+	if d := r.URL.Query().Get("delay"); d != "" {
+		dx, err := strconv.ParseFloat(d, 64)
+		if err != nil {
+			return nil, nil, err
+		}
+		if dx < 0 {
+			return nil, nil, http.ErrAbortHandler
+		}
+		delay = &dx
+	}
+
+	return nice, delay, nil
+}
+
+func handleCreateTicket(ctx context.Context, kh *lymbo.Kharon) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "" {
 			http.Error(w, "ticket ID is required", http.StatusBadRequest)
@@ -146,30 +174,10 @@ func main() {
 			return
 		}
 
-		var nice *int
-		if n := r.URL.Query().Get("nice"); n != "" {
-			// Convert nice to int
-			nx, err := strconv.Atoi(n)
-			if err != nil {
-				http.Error(w, "invalid nice value", http.StatusBadRequest)
-				return
-			}
-			nice = &nx
-		}
-
-		var delay *float64
-		if d := r.URL.Query().Get("delay"); d != "" {
-			// Convert delay to int
-			dx, err := strconv.ParseFloat(d, 64)
-			if err != nil {
-				http.Error(w, "invalid delay value", http.StatusBadRequest)
-				return
-			}
-			if dx < 0 {
-				http.Error(w, "delay must be non-negative", http.StatusBadRequest)
-				return
-			}
-			delay = &dx
+		nice, delay, err := parseTicketParams(r)
+		if err != nil {
+			http.Error(w, "invalid parameters", http.StatusBadRequest)
+			return
 		}
 
 		payload, err := io.ReadAll(r.Body)
@@ -179,13 +187,13 @@ func main() {
 			return
 		}
 
-		// Create new ticket
 		ticket, err := lymbo.NewTicket(lymbo.TicketId(id), typ)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to create ticket", "error", err)
 			http.Error(w, "failed to create ticket", http.StatusInternalServerError)
 			return
 		}
+
 		ticket = ticket.WithPayload(payload)
 		if nice != nil {
 			ticket = ticket.WithNice(*nice)
@@ -195,7 +203,6 @@ func main() {
 			ticket = ticket.WithRunat(d)
 		}
 
-		// Submit ticket to kharon
 		if err := kh.Add(r.Context(), *ticket); err != nil {
 			slog.ErrorContext(ctx, "failed to add ticket", "error", err)
 			http.Error(w, "failed to add ticket", http.StatusInternalServerError)
@@ -203,19 +210,13 @@ func main() {
 		}
 
 		w.WriteHeader(http.StatusAccepted)
-	}))
-
-	// Start simple http server:
-	server := &http.Server{
-		Addr:    "127.0.0.1:8080",
-		Handler: mux,
 	}
+}
 
-	// Register sigterm, sigint:
+func runServer(ctx context.Context, server *http.Server, cancel context.CancelFunc) {
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start server in goroutine
 	serverErr := make(chan error, 1)
 	go func() {
 		slog.InfoContext(ctx, "starting HTTP server", "addr", server.Addr)
@@ -229,17 +230,13 @@ func main() {
 		}
 	case sig := <-shutdown:
 		slog.InfoContext(ctx, "Shutdown signal received", slog.String("signal", sig.String()))
-
-		// Stop background services
 		cancel()
 
-		// Give outstanding requests time to complete (30 seconds)
-		shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			slog.ErrorContext(ctx, "HTTP server shutdown error", slog.Any("error", err))
-			// Force close if graceful shutdown fails
 			_ = server.Close()
 		}
 

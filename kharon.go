@@ -84,7 +84,7 @@ func DefaultSettings() *Settings {
 		minPollInterval:  MinPollIntervalDefault,
 		maxBackoffDelay:  MaxBackoffDelay,
 		batchSize:        10,
-		workers:          5,
+		workers:          4,
 		enableExpiration: true,
 	}
 }

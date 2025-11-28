@@ -7,26 +7,35 @@ import (
 	"github.com/ochaton/lymbo/status"
 )
 
+// TicketId is a unique identifier for a ticket.
 type TicketId string
 
+// Ticket represents a job to be processed.
 type Ticket struct {
 	ID          TicketId
 	Status      status.Status
-	Runat       time.Time
-	Nice        int
-	Type        string // Opaque type identifier
-	Ctime       time.Time
-	Mtime       *time.Time
-	Attempts    int
-	Payload     any
-	ErrorReason any
+	Runat       time.Time  // Time when the ticket should be processed
+	Nice        int        // Priority value (lower = higher priority)
+	Type        string     // Ticket type identifier for routing
+	Ctime       time.Time  // Creation time
+	Mtime       *time.Time // Last modification time
+	Attempts    int        // Number of processing attempts
+	Payload     any        // Arbitrary payload data
+	ErrorReason any        // Error information if processing failed
 }
 
-var ErrTidEmpty = errors.New("ticket ID cannot be empty")
-var ErrTypeEmpty = errors.New("ticket type cannot be empty")
+var (
+	// ErrTidEmpty is returned when a ticket ID is empty.
+	ErrTidEmpty = errors.New("ticket ID cannot be empty")
+	// ErrTypeEmpty is returned when a ticket type is empty.
+	ErrTypeEmpty = errors.New("ticket type cannot be empty")
+)
 
+// DefaultNice is the default priority value for new tickets.
 const DefaultNice = 512
 
+// NewTicket creates a new ticket with the given ID and type.
+// Returns an error if tid or typ is empty.
 func NewTicket(tid TicketId, typ string) (*Ticket, error) {
 	if tid == "" {
 		return nil, ErrTidEmpty
@@ -35,29 +44,33 @@ func NewTicket(tid TicketId, typ string) (*Ticket, error) {
 		return nil, ErrTypeEmpty
 	}
 
+	now := time.Now()
 	return &Ticket{
-		ID:       tid,
-		Runat:    time.Now(),
-		Nice:     DefaultNice,
-		Type:     typ,
-		Ctime:    time.Now(),
-		Mtime:    nil,
-		Attempts: 0,
-		// Payload:     nil,
+		ID:          tid,
+		Runat:       now,
+		Nice:        DefaultNice,
+		Type:        typ,
+		Ctime:       now,
+		Mtime:       nil,
+		Attempts:    0,
+		Payload:     nil,
 		ErrorReason: nil,
 	}, nil
 }
 
+// WithPayload sets the payload for the ticket and returns the ticket.
 func (t *Ticket) WithPayload(payload any) *Ticket {
 	t.Payload = payload
 	return t
 }
 
+// WithNice sets the priority for the ticket and returns the ticket.
 func (t *Ticket) WithNice(nice int) *Ticket {
 	t.Nice = nice
 	return t
 }
 
+// WithRunat sets the run time for the ticket and returns the ticket.
 func (t *Ticket) WithRunat(runat time.Time) *Ticket {
 	t.Runat = runat
 	return t

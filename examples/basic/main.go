@@ -21,18 +21,24 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
-	kh := lymbo.NewKharon(store.NewMemoryStore(), lymbo.Settings{EnableExpiration: true}, logger)
+	settings := lymbo.DefaultSettings().
+		WithExpiration().
+		WithProcessTime(3 * time.Second).
+		WithWorkers(5).
+		WithBatchSize(5)
+
+	kh := lymbo.NewKharon(store.NewMemoryStore(), settings, logger)
 
 	r := lymbo.NewRouter()
 	r.HandleFunc("example", func(ctx context.Context, t lymbo.Ticket) error {
 		slog.InfoContext(ctx, "processing ticket", "ticket_id", t.ID, "payload", t.Payload, "runat", t.Runat)
 		time.Sleep(100 * time.Millisecond) // Simulate work
-		return kh.Done(t.ID, lymbo.WithExpireIn(10*time.Second))
+		return kh.Done(ctx, t.ID, lymbo.WithExpireIn(10*time.Second))
 	})
 
 	r.NotFoundFunc(func(ctx context.Context, t lymbo.Ticket) error {
 		slog.WarnContext(ctx, "unknown ticket type", "ticket_id", t.ID, "ticket_type", t.Type)
-		return kh.Fail(t.ID, lymbo.WithErrorReason("unsupported ticket type"))
+		return kh.Fail(ctx, t.ID, lymbo.WithErrorReason("unsupported ticket type"))
 	})
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -57,7 +63,7 @@ func main() {
 		}
 
 		// Fetch ticket from store
-		ticket, err := kh.Get(lymbo.TicketId(id))
+		ticket, err := kh.Get(r.Context(), lymbo.TicketId(id))
 		switch err {
 		case nil:
 			// Write ticket details to response
@@ -89,7 +95,7 @@ func main() {
 		}
 
 		// Cancel ticket in store
-		err := kh.Cancel(lymbo.TicketId(id), lymbo.WithErrorReason("cancelled via api"))
+		err := kh.Cancel(r.Context(), lymbo.TicketId(id), lymbo.WithErrorReason("cancelled via api"))
 		switch err {
 		case nil:
 			w.WriteHeader(http.StatusNoContent)
@@ -113,7 +119,7 @@ func main() {
 		}
 
 		// Delete ticket from store
-		err := kh.Delete(lymbo.TicketId(id))
+		err := kh.Delete(r.Context(), lymbo.TicketId(id))
 		switch err {
 		case nil, lymbo.ErrTicketNotFound:
 			w.WriteHeader(http.StatusNoContent)
@@ -190,7 +196,7 @@ func main() {
 		}
 
 		// Submit ticket to kharon
-		if err := kh.Add(*ticket); err != nil {
+		if err := kh.Add(r.Context(), *ticket); err != nil {
 			slog.ErrorContext(ctx, "failed to add ticket", "error", err)
 			http.Error(w, "failed to add ticket", http.StatusInternalServerError)
 			return

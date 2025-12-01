@@ -19,10 +19,10 @@ const (
 	MaxPollIntervalDefault = 15 * time.Second
 
 	// ExpirationBatchSize is the number of tickets to expire per batch.
-	ExpirationBatchSize = 100
+	ExpirationBatchSize = 1000
 
 	// ExpirationInterval is how often to run the expiration worker.
-	ExpirationInterval = 3 * time.Second
+	ExpirationInterval = 100 * time.Millisecond
 )
 
 const (
@@ -82,19 +82,23 @@ type Settings struct {
 
 	// enableExpiration enables automatic cleanup of expired tickets.
 	enableExpiration bool
+
+	// expirationInterval
+	expirationInterval time.Duration ``
 }
 
 // DefaultSettings returns a Settings instance with sensible defaults.
 func DefaultSettings() *Settings {
 	return &Settings{
-		processTime:      30 * time.Second,
-		maxPollInterval:  MaxPollIntervalDefault,
-		minPollInterval:  MinPollIntervalDefault,
-		maxBackoffDelay:  MaxBackoffDelay,
-		backoffBase:      DefaultBackoffBase,
-		batchSize:        10,
-		workers:          4,
-		enableExpiration: true,
+		processTime:        30 * time.Second,
+		maxPollInterval:    MaxPollIntervalDefault,
+		minPollInterval:    MinPollIntervalDefault,
+		maxBackoffDelay:    MaxBackoffDelay,
+		backoffBase:        DefaultBackoffBase,
+		batchSize:          10,
+		workers:            4,
+		enableExpiration:   true,
+		expirationInterval: ExpirationInterval,
 	}
 }
 
@@ -290,7 +294,7 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(sleepDuration):
-			result, err := k.store.PollPending(PollRequest{
+			result, err := k.store.PollPending(ctx, PollRequest{
 				Limit:           k.settings.batchSize,
 				Now:             time.Now(),
 				TTR:             k.settings.processTime,
@@ -299,6 +303,7 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 			})
 			if err != nil {
 				k.logger.ErrorContext(ctx, "error polling store", "error", err)
+				sleepDuration = k.settings.maxPollInterval
 				continue
 			}
 
@@ -311,6 +316,7 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 
 			for _, t := range result.Tickets {
 				k.bus <- &t
+				sleepDuration = 0
 			}
 		}
 	}
@@ -319,7 +325,7 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 // runExpirationWorker runs a background worker that periodically expires old tickets.
 func (k *Kharon) runExpirationWorker(ctx context.Context) {
 	k.logger.InfoContext(ctx, "ticket expiration worker started")
-	ticker := time.NewTicker(ExpirationInterval)
+	ticker := time.NewTicker(k.settings.expirationInterval)
 	defer ticker.Stop()
 
 	for {
@@ -328,10 +334,12 @@ func (k *Kharon) runExpirationWorker(ctx context.Context) {
 			k.logger.DebugContext(ctx, "ticket expiration worker exiting")
 			return
 		case <-ticker.C:
-			if err := k.store.ExpireTickets(ExpirationBatchSize, time.Now()); err != nil {
+			if n, err := k.store.ExpireTickets(ctx, ExpirationBatchSize, time.Now()); err != nil {
 				k.logger.ErrorContext(ctx, "error expiring tickets", "error", err)
 			} else {
-				k.logger.DebugContext(ctx, "ticket expiration run completed")
+				if n > 0 {
+					k.logger.InfoContext(ctx, "ticket expiration run completed", "expired_count", n)
+				}
 			}
 		}
 	}

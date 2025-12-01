@@ -144,12 +144,13 @@ func (m *MemoryStore) PollPending(_ context.Context, req lymbo.PollRequest) (lym
 
 // ExpireTickets removes expired non-pending tickets from the store.
 // It deletes up to limit tickets that have expired (runat is before now).
-func (m *MemoryStore) ExpireTickets(_ context.Context, limit int, now time.Time) error {
+func (m *MemoryStore) ExpireTickets(_ context.Context, limit int, now time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	count := 0
 	for tid, t := range m.data {
-		if limit <= 0 {
+		if count == limit {
 			break
 		}
 
@@ -162,8 +163,8 @@ func (m *MemoryStore) ExpireTickets(_ context.Context, limit int, now time.Time)
 		}
 
 		delete(m.data, tid)
-		limit--
+		count++
 	}
 
-	return nil
+	return int64(count), nil
 }

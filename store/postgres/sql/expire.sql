@@ -3,6 +3,6 @@ DELETE FROM tickets
 WHERE id IN (
 	SELECT id
 	FROM tickets
-	WHERE status != 'pending' AND runat <= $2
-	LIMIT $1
+	WHERE status != 'pending' AND runat <= @expire_before
+	LIMIT @limit
 )

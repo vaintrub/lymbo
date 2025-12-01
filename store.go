@@ -44,7 +44,7 @@ type Store interface {
 	// ExpireTickets removes expired tickets from the store.
 	// Only removes non-pending tickets where Runat is before now.
 	// Deletes up to limit tickets.
-	ExpireTickets(ctx context.Context, limit int, now time.Time) error
+	ExpireTickets(ctx context.Context, limit int, now time.Time) (int64, error)
 }
 
 // PollResult contains the result of a store polling operation.

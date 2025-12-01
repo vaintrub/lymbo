@@ -10,6 +10,10 @@ import (
 // TicketId is a unique identifier for a ticket.
 type TicketId string
 
+func (t TicketId) String() string {
+	return string(t)
+}
+
 // Ticket represents a job to be processed.
 type Ticket struct {
 	ID          TicketId
@@ -48,6 +52,7 @@ func NewTicket(tid TicketId, typ string) (*Ticket, error) {
 	return &Ticket{
 		ID:          tid,
 		Runat:       now,
+		Status:      status.Pending,
 		Nice:        DefaultNice,
 		Type:        typ,
 		Ctime:       now,

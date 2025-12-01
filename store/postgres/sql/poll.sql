@@ -1,19 +1,19 @@
 -- Poll pending tickets for processing.
--- $1=now, $2=limit, $3=ttr, $4=backoffBase, $5=backoffCap
+-- @now=now, @limit=limit, @ttr=ttr, @delay_base=delay_base, @delay_max=delay_max
 WITH
 rescheduled_tickets AS (
     UPDATE tickets
     SET
         attempts = attempts + 1,
-        runat    = $1
-			+ GREATEST($3, 0) * INTERVAL '1 second'
-			+ LEAST(POWER($4, attempts), $5) * INTERVAL '1 second'
+        runat    = @now
+			+ GREATEST(@ttr, 0) * INTERVAL '1 second'
+			+ LEAST(POWER(@delay_base, attempts), @delay_max) * INTERVAL '1 second'
     WHERE id IN (
         SELECT id
         FROM tickets
-        WHERE status = 'pending' AND runat <= $1
+        WHERE status = 'pending' AND runat <= @now
         ORDER BY runat ASC, nice ASC
-        LIMIT $2
+        LIMIT @limit
         FOR UPDATE SKIP LOCKED
     )
     RETURNING id, status, runat, nice, type, ctime, mtime, attempts, payload, error_reason
@@ -29,12 +29,12 @@ future_ticket AS (
 	FOR SHARE SKIP LOCKED
 )
 SELECT
-    'ticket' AS row_type,
+    'ticket' AS ticket,
     rescheduled_tickets.*
 FROM rescheduled_tickets
 UNION ALL
 SELECT
-    'future_ticket' AS row_type,
+    'future_ticket' AS ticket,
     future_ticket.*
 FROM future_ticket
 WHERE NOT EXISTS (SELECT 1 FROM rescheduled_tickets);

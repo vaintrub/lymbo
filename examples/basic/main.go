@@ -40,32 +40,18 @@ func main() {
 		slog.InfoContext(ctx, "using in-memory storage")
 		kh = lymbo.NewKharon(store.NewMemoryStore(), settings, logger)
 	default:
-		pool, err := pgxpool.New(ctx, os.Getenv("DB_DSN"))
+		cf, err := pgxpool.ParseConfig(os.Getenv("DB_DSN"))
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to connect to pgpool", "error", err)
 			os.Exit(1)
 		}
-		store := postgres.New(pool)
-		defer store.Close()
-		// It should be fail save
-		go func() {
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					slog.InfoContext(ctx, "attempting to initialize schema for kharon")
-					if err := store.InitSchema(ctx); err != nil {
-						slog.ErrorContext(ctx, "failed to init database schema", "error", err)
-						continue
-					}
-					slog.InfoContext(ctx, "database schema initialized successfully")
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
+		cf.HealthCheckPeriod = 300 * time.Millisecond
+		pool, err := pgxpool.NewWithConfig(ctx, cf)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to connect to pgpool", "error", err)
+			os.Exit(1)
+		}
+		store := postgres.NewTicketsRepository(pool)
 		kh = lymbo.NewKharon(store, settings, logger)
 	}
 

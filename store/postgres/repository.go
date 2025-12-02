@@ -47,7 +47,7 @@ func (r *Tickets) Get(ctx context.Context, id lymbo.TicketId) (lymbo.Ticket, err
 	return toLymboTicket(row)
 }
 
-func (r *Tickets) Add(ctx context.Context, ticket lymbo.Ticket) error {
+func (r *Tickets) Put(ctx context.Context, ticket lymbo.Ticket) error {
 	req, err := toPostgresTicket(ticket)
 	if err != nil {
 		return err

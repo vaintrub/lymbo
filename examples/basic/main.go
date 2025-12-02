@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/ochaton/lymbo"
-	"github.com/ochaton/lymbo/store"
+	"github.com/ochaton/lymbo/store/memory"
 	"github.com/ochaton/lymbo/store/postgres"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,7 +28,10 @@ func main() {
 	settings := lymbo.DefaultSettings().
 		WithExpiration().
 		WithProcessTime(100 * time.Microsecond).
-		WithWorkers(32)
+		WithWorkers(32).
+		WithBatchSize(32).
+		WithMinPollInterval(100 * time.Microsecond).
+		WithMaxPollInterval(1 * time.Second)
 
 	var kh *lymbo.Kharon
 	dbtype := os.Getenv("DB_TYPE")
@@ -38,7 +41,7 @@ func main() {
 	switch dbtype {
 	case "memory":
 		slog.InfoContext(ctx, "using in-memory storage")
-		kh = lymbo.NewKharon(store.NewMemoryStore(), settings, logger)
+		kh = lymbo.NewKharon(memory.NewStore(), settings, logger)
 	default:
 		cf, err := pgxpool.ParseConfig(os.Getenv("DB_DSN"))
 		if err != nil {
@@ -58,12 +61,11 @@ func main() {
 	r := lymbo.NewRouter()
 	r.HandleFunc("example", func(ctx context.Context, t lymbo.Ticket) error {
 		slog.InfoContext(ctx, "processing ticket", "ticket_id", t.ID, "payload", t.Payload, "runat", t.Runat, "attempt", t.Attempts)
-		// time.Sleep(100 * time.Millisecond) // Simulate work
 		return kh.Ack(ctx, t.ID)
 	})
 
 	r.NotFoundFunc(func(ctx context.Context, t lymbo.Ticket) error {
-		slog.WarnContext(ctx, "unknown ticket type", "ticket_id", t.ID, "ticket_type", t.Type)
+		slog.DebugContext(ctx, "unknown ticket type", "ticket_id", t.ID, "ticket_type", t.Type)
 		return kh.Fail(ctx, t.ID, lymbo.WithErrorReason("unsupported ticket type"))
 	})
 
@@ -74,6 +76,48 @@ func main() {
 		if err := kh.Run(ctx, r); err != nil {
 			slog.ErrorContext(ctx, "kharon failed", "error", err)
 			os.Exit(1)
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		var prev lymbo.Stats
+		ts := time.Now()
+		for {
+			select {
+			case <-ticker.C:
+				stats := kh.Stats()
+				slog.InfoContext(ctx, "kharon stats",
+					"scheduled", stats.Scheduled,
+					"added", stats.Added,
+					"polled", stats.Polled,
+					"acked", stats.Acked,
+					"done", stats.Done,
+					"canceled", stats.Canceled,
+					"failed", stats.Failed,
+					"expired", stats.Expired,
+				)
+				// Evaluate rates
+				interval := time.Since(ts).Seconds()
+				if interval > 0 {
+					slog.InfoContext(ctx, "kharon rates",
+						"schedule_rate", hRate(float64(stats.Scheduled-prev.Scheduled)/interval),
+						"add_rate", hRate(float64(stats.Added-prev.Added)/interval),
+						"poll_rate", hRate(float64(stats.Polled-prev.Polled)/interval),
+						"ack_rate", hRate(float64(stats.Acked-prev.Acked)/interval),
+						"done_rate", hRate(float64(stats.Done-prev.Done)/interval),
+						"cancel_rate", hRate(float64(stats.Canceled-prev.Canceled)/interval),
+						"fail_rate", hRate(float64(stats.Failed-prev.Failed)/interval),
+						"expire_rate", hRate(float64(stats.Expired-prev.Expired)/interval),
+					)
+				}
+				ts = time.Now()
+				prev = stats
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
@@ -254,8 +298,7 @@ func (h *AddTicketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var nice *int
-	var delay *float64
+	opts := []lymbo.Option{}
 	{
 		if n := r.URL.Query().Get("nice"); n != "" {
 			nx, err := strconv.Atoi(n)
@@ -264,7 +307,7 @@ func (h *AddTicketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid parameters", http.StatusBadRequest)
 				return
 			}
-			nice = &nx
+			opts = append(opts, lymbo.WithNice(nx))
 		}
 
 		if d := r.URL.Query().Get("delay"); d != "" {
@@ -279,7 +322,7 @@ func (h *AddTicketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid parameters", http.StatusBadRequest)
 				return
 			}
-			delay = &dx
+			opts = append(opts, lymbo.WithDelay(time.Duration(dx*float64(time.Second))))
 		}
 	}
 
@@ -300,15 +343,8 @@ func (h *AddTicketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(payload) > 0 {
 		ticket = ticket.WithPayload(payload)
 	}
-	if nice != nil {
-		ticket = ticket.WithNice(*nice)
-	}
-	if delay != nil {
-		d := time.Now().Add(time.Duration(*delay * float64(time.Second)))
-		ticket = ticket.WithRunat(d)
-	}
 
-	err = h.kh.Add(r.Context(), *ticket)
+	err = h.kh.Put(r.Context(), *ticket, opts...)
 	switch err {
 	case nil:
 		break
@@ -361,4 +397,14 @@ func setupLogger() *slog.Logger {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 	return logger
+}
+
+func hRate(r float64) string {
+	if r > 1_000_000 {
+		return fmt.Sprintf("%.2fM/s", r/1_000_000)
+	}
+	if r > 1000 {
+		return fmt.Sprintf("%.2fk/s", r/1000)
+	}
+	return fmt.Sprintf("%.2f/s", r)
 }

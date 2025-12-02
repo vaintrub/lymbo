@@ -22,10 +22,10 @@ type Store interface {
 	// Returns ErrTicketNotFound if the ticket doesn't exist.
 	Get(context.Context, TicketId) (Ticket, error)
 
-	// Add adds a new ticket to the store.
+	// Put adds a new ticket to the store or updates an existing one.
 	// The ticket status will be set to Pending.
 	// Returns ErrTicketIDEmpty if the ticket ID is empty.
-	Add(context.Context, Ticket) error
+	Put(context.Context, Ticket) error
 
 	// Delete removes a ticket from the store.
 	// This operation is idempotent and won't return an error if the ticket doesn't exist.

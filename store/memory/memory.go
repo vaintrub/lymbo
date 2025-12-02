@@ -1,4 +1,4 @@
-package store
+package memory
 
 import (
 	"context"
@@ -11,24 +11,24 @@ import (
 	"github.com/ochaton/lymbo/status"
 )
 
-// MemoryStore is an in-memory implementation of the lymbo.Store interface.
-type MemoryStore struct {
+// Store is an in-memory implementation of the lymbo.Store interface.
+type Store struct {
 	mu   sync.RWMutex
 	data map[lymbo.TicketId]lymbo.Ticket
 }
 
-// Ensure MemoryStore implements lymbo.Store interface.
-var _ lymbo.Store = (*MemoryStore)(nil)
+// Ensure Store implements lymbo.Store interface.
+var _ lymbo.Store = (*Store)(nil)
 
-// NewMemoryStore creates a new in-memory ticket store.
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
+// NewStore creates a new in-memory ticket store.
+func NewStore() *Store {
+	return &Store{
 		data: make(map[lymbo.TicketId]lymbo.Ticket),
 	}
 }
 
 // Get retrieves a ticket by ID.
-func (m *MemoryStore) Get(_ context.Context, id lymbo.TicketId) (lymbo.Ticket, error) {
+func (m *Store) Get(_ context.Context, id lymbo.TicketId) (lymbo.Ticket, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -39,8 +39,8 @@ func (m *MemoryStore) Get(_ context.Context, id lymbo.TicketId) (lymbo.Ticket, e
 	return ticket, nil
 }
 
-// Add adds a new ticket to the store.
-func (m *MemoryStore) Add(_ context.Context, t lymbo.Ticket) error {
+// Put adds a new ticket to the store.
+func (m *Store) Put(_ context.Context, t lymbo.Ticket) error {
 	if t.ID == "" {
 		return lymbo.ErrTicketIDEmpty
 	}
@@ -55,7 +55,7 @@ func (m *MemoryStore) Add(_ context.Context, t lymbo.Ticket) error {
 }
 
 // Delete removes a ticket from the store.
-func (m *MemoryStore) Delete(_ context.Context, id lymbo.TicketId) error {
+func (m *Store) Delete(_ context.Context, id lymbo.TicketId) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -63,7 +63,7 @@ func (m *MemoryStore) Delete(_ context.Context, id lymbo.TicketId) error {
 	return nil
 }
 
-func (m *MemoryStore) Update(ctx context.Context, tid lymbo.TicketId, fn lymbo.UpdateFunc) error {
+func (m *Store) Update(ctx context.Context, tid lymbo.TicketId, fn lymbo.UpdateFunc) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -82,7 +82,7 @@ func (m *MemoryStore) Update(ctx context.Context, tid lymbo.TicketId, fn lymbo.U
 
 // PollPending retrieves pending tickets ready for processing.
 // It returns up to limit tickets that are ready to run, sorted by priority.
-func (m *MemoryStore) PollPending(_ context.Context, req lymbo.PollRequest) (lymbo.PollResult, error) {
+func (m *Store) PollPending(_ context.Context, req lymbo.PollRequest) (lymbo.PollResult, error) {
 	if req.Limit <= 0 {
 		return lymbo.PollResult{}, lymbo.ErrLimitInvalid
 	}
@@ -144,7 +144,7 @@ func (m *MemoryStore) PollPending(_ context.Context, req lymbo.PollRequest) (lym
 
 // ExpireTickets removes expired non-pending tickets from the store.
 // It deletes up to limit tickets that have expired (runat is before now).
-func (m *MemoryStore) ExpireTickets(_ context.Context, limit int, now time.Time) (int64, error) {
+func (m *Store) ExpireTickets(_ context.Context, limit int, now time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

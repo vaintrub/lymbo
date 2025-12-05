@@ -80,6 +80,32 @@ func (m *Store) Update(ctx context.Context, tid lymbo.TicketId, fn lymbo.UpdateF
 	return nil
 }
 
+func (m *Store) UpdateSet(ctx context.Context, tid lymbo.TicketId, us lymbo.UpdateSet) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	t, exists := m.data[tid]
+	if !exists {
+		return lymbo.ErrTicketNotFound
+	}
+
+	if us.Nice != nil {
+		t.Nice = *us.Nice
+	}
+	if us.Runat != nil {
+		t.Runat = *us.Runat
+	}
+	if us.Payload != nil {
+		t.Payload = us.Payload
+	}
+	if us.ErrorReason != nil {
+		t.ErrorReason = us.ErrorReason
+	}
+
+	m.data[tid] = t
+	return nil
+}
+
 // PollPending retrieves pending tickets ready for processing.
 // It returns up to limit tickets that are ready to run, sorted by priority.
 func (m *Store) PollPending(_ context.Context, req lymbo.PollRequest) (lymbo.PollResult, error) {

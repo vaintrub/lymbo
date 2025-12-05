@@ -24,16 +24,16 @@ func NewRouter() *Router {
 var DefaultRouter = NewRouter()
 
 // HandlerFunc is an adapter to allow ordinary functions to be used as handlers.
-type HandlerFunc func(context.Context, Ticket) error
+type HandlerFunc func(context.Context, *Ticket) error
 
 // ProcessTicket implements the Handler interface for HandlerFunc.
-func (f HandlerFunc) ProcessTicket(ctx context.Context, t Ticket) error {
+func (f HandlerFunc) ProcessTicket(ctx context.Context, t *Ticket) error {
 	return f(ctx, t)
 }
 
 // Handler processes tickets.
 type Handler interface {
-	ProcessTicket(ctx context.Context, ticket Ticket) error
+	ProcessTicket(ctx context.Context, ticket *Ticket) error
 }
 
 // Handler returns the handler for the given ticket.
@@ -59,7 +59,7 @@ func (r *Router) NotFoundHandler() Handler {
 }
 
 // HandleFunc registers a handler function for the given route.
-func (r *Router) HandleFunc(route string, handler func(context.Context, Ticket) error) error {
+func (r *Router) HandleFunc(route string, handler func(context.Context, *Ticket) error) error {
 	return r.register(route, HandlerFunc(handler))
 }
 
@@ -81,7 +81,7 @@ func (r *Router) NotFound(handler Handler) {
 
 // NotFoundFunc sets a handler function to use when no route matches.
 // Panics if handler is nil.
-func (r *Router) NotFoundFunc(handler func(context.Context, Ticket) error) {
+func (r *Router) NotFoundFunc(handler func(context.Context, *Ticket) error) {
 	if handler == nil {
 		panic("kharon: nil not found handler")
 	}
@@ -117,12 +117,12 @@ func Handle(route string, handler Handler) error {
 }
 
 // HandleFunc registers a handler function for the given route on the default router.
-func HandleFunc(route string, handler func(context.Context, Ticket) error) error {
+func HandleFunc(route string, handler func(context.Context, *Ticket) error) error {
 	return DefaultRouter.register(route, HandlerFunc(handler))
 }
 
 // NotFound is the default not-found handler function.
-func NotFound(context.Context, Ticket) error {
+func NotFound(context.Context, *Ticket) error {
 	return ErrHandlerNotFound
 }
 

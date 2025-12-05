@@ -25,6 +25,17 @@ ON CONFLICT (id) DO UPDATE SET
 DELETE FROM tickets
 WHERE id IN (SELECT id FROM tickets as t WHERE t.status != 'pending' AND t.runat <= @expire_before LIMIT @lim);
 
+-- name: UpdateTicket :exec
+UPDATE tickets
+SET
+    status = COALESCE(sqlc.narg('status'), status),
+    nice = COALESCE(sqlc.narg('nice'), nice),
+    runat = COALESCE(sqlc.narg('runat'), runat),
+    payload = COALESCE(sqlc.narg('payload'), payload),
+    error_reason = COALESCE(sqlc.narg('error_reason'), error_reason),
+    mtime = NOW()
+WHERE id = @id;
+
 -- name: PollTickets :many
 WITH rescheduled_tickets AS (
     UPDATE tickets as t
@@ -35,7 +46,6 @@ WITH rescheduled_tickets AS (
         SELECT t.id
         FROM tickets as t
         WHERE t.status = 'pending' AND t.runat <= sqlc.arg(now)::Timestamptz
-        ORDER BY t.runat ASC, t.nice ASC
         LIMIT sqlc.arg(lim)
         FOR UPDATE SKIP LOCKED
     )

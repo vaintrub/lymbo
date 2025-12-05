@@ -13,6 +13,9 @@ type Opts struct {
 	// delay sets a delay before the ticket becomes eligible for processing.
 	delay time.Duration
 
+	// runat is evaluated from delay to set the ticket's Runat time.
+	runat time.Time
+
 	// keep indicates whether to retain the ticket in the store after the operation.
 	// By default, completed/failed/cancelled tickets are removed.
 	keep bool

@@ -55,44 +55,73 @@ type counter struct {
 }
 
 type stats struct {
-	added     *counter
-	polled    *counter
-	scheduled *counter
-	acked     *counter
-	failed    *counter
-	done      *counter
-	retried   *counter
-	canceled  *counter
-	deleted   *counter
-	expired   *counter
+	added        *counter
+	polled       *counter
+	scheduled    *counter
+	acked        *counter
+	failed       *counter
+	done         *counter
+	retried      *counter
+	canceled     *counter
+	deleted      *counter
+	expired      *counter
+	processed    *counter
+	poll_time    *hist
+	process_time *hist
 }
 
 type Stats struct {
-	Added     int64 `json:"added"`
-	Polled    int64 `json:"polled"`
-	Scheduled int64 `json:"scheduled"`
-	Acked     int64 `json:"acked"`
-	Failed    int64 `json:"failed"`
-	Done      int64 `json:"done"`
-	Retried   int64 `json:"retried"`
-	Canceled  int64 `json:"canceled"`
-	Deleted   int64 `json:"deleted"`
-	Expired   int64 `json:"expired"`
+	Added       int64          `json:"added"`
+	Polled      int64          `json:"polled"`
+	Scheduled   int64          `json:"scheduled"`
+	Acked       int64          `json:"acked"`
+	Failed      int64          `json:"failed"`
+	Done        int64          `json:"done"`
+	Retried     int64          `json:"retried"`
+	Canceled    int64          `json:"canceled"`
+	Deleted     int64          `json:"deleted"`
+	Expired     int64          `json:"expired"`
+	Processed   int64          `json:"processed"`
+	PollTime    HistogramStats `json:"poll_time"`
+	ProcessTime HistogramStats `json:"process_time"`
 }
 
 func newStats() *stats {
 	return &stats{
-		added:     &counter{},
-		polled:    &counter{},
-		scheduled: &counter{},
-		acked:     &counter{},
-		failed:    &counter{},
-		done:      &counter{},
-		retried:   &counter{},
-		canceled:  &counter{},
-		deleted:   &counter{},
-		expired:   &counter{},
+		added:        &counter{},
+		polled:       &counter{},
+		scheduled:    &counter{},
+		acked:        &counter{},
+		failed:       &counter{},
+		done:         &counter{},
+		retried:      &counter{},
+		canceled:     &counter{},
+		deleted:      &counter{},
+		expired:      &counter{},
+		processed:    &counter{},
+		poll_time:    newHist(),
+		process_time: newHist(),
 	}
+}
+
+func (s *stats) reset() {
+	s.added.value = 0
+	s.polled.value = 0
+	s.scheduled.value = 0
+	s.acked.value = 0
+	s.failed.value = 0
+	s.done.value = 0
+	s.retried.value = 0
+	s.canceled.value = 0
+	s.deleted.value = 0
+	s.expired.value = 0
+	s.processed.value = 0
+	s.poll_time.Reset()
+	s.process_time.Reset()
+}
+
+func (kh *Kharon) ResetStats() {
+	kh.stats.reset()
 }
 
 // NewKharon creates a new Kharon instance with the provided store, settings, and logger.
@@ -126,11 +155,8 @@ func applyOpts(ctx context.Context, t *Ticket, s status.Status, o *Opts) error {
 	t.Status = s
 	now := time.Now()
 	t.Mtime = &now
-	if o.delay > 0 {
-		t.Runat = now.Add(o.delay)
-	} else if t.Status != status.Pending {
-		// If delay is not set and status is not pending, set Runat to infinity
-		t.Runat = time.Unix(maxUnix, 0)
+	if o.delay > 0 || t.Status != status.Pending {
+		t.Runat = o.runat
 	}
 	if o.errorReason != nil {
 		t.ErrorReason = o.errorReason
@@ -149,6 +175,21 @@ func applyOpts(ctx context.Context, t *Ticket, s status.Status, o *Opts) error {
 }
 
 func (k *Kharon) save(ctx context.Context, tid TicketId, s status.Status, o *Opts) error {
+	if o.update == nil {
+		// then we can do a simple update
+		pr := &o.runat
+		if s == status.Pending && o.delay == 0 {
+			// drop runat update
+			pr = nil
+		}
+		return k.store.UpdateSet(ctx, tid, UpdateSet{
+			Status:      &s,
+			Nice:        o.nice,
+			Runat:       pr,
+			Payload:     nil,
+			ErrorReason: o.errorReason,
+		})
+	}
 	return k.store.Update(ctx, tid, func(ctx context.Context, t *Ticket) error {
 		return applyOpts(ctx, t, s, o)
 	})
@@ -158,6 +199,13 @@ func toOpts(opts ...Option) *Opts {
 	o := &Opts{}
 	for _, opt := range opts {
 		opt(o)
+	}
+	if o.delay > 0 {
+		t := time.Now().Add(o.delay)
+		o.runat = t
+	} else {
+		// If delay is not set and status is not pending, set Runat to infinity
+		o.runat = time.Unix(maxUnix, 0)
 	}
 	return o
 }
@@ -258,16 +306,19 @@ func (k *Kharon) Get(ctx context.Context, tid TicketId) (Ticket, error) {
 
 func (k *Kharon) Stats() Stats {
 	return Stats{
-		Added:     k.stats.added.value,
-		Polled:    k.stats.polled.value,
-		Scheduled: k.stats.scheduled.value,
-		Acked:     k.stats.acked.value,
-		Failed:    k.stats.failed.value,
-		Done:      k.stats.done.value,
-		Retried:   k.stats.retried.value,
-		Canceled:  k.stats.canceled.value,
-		Deleted:   k.stats.deleted.value,
-		Expired:   k.stats.expired.value,
+		Added:       k.stats.added.value,
+		Polled:      k.stats.polled.value,
+		Scheduled:   k.stats.scheduled.value,
+		Acked:       k.stats.acked.value,
+		Failed:      k.stats.failed.value,
+		Done:        k.stats.done.value,
+		Retried:     k.stats.retried.value,
+		Canceled:    k.stats.canceled.value,
+		Deleted:     k.stats.deleted.value,
+		Expired:     k.stats.expired.value,
+		Processed:   k.stats.processed.value,
+		PollTime:    k.stats.poll_time.Collect().Stats(),
+		ProcessTime: k.stats.process_time.Collect().Stats(),
 	}
 }
 
@@ -289,13 +340,14 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 
 	k.logger.InfoContext(ctx, "kharon started",
 		"workers", k.settings.workers,
-		"min_poll_timeout", k.settings.minPollInterval.String(),
-		"max_poll_timeout", k.settings.maxPollInterval.String(),
+		"min_poll_timeout", k.settings.minReactionDelay.String(),
+		"max_poll_timeout", k.settings.maxReactionDelay.String(),
 		"batch_size", k.settings.batchSize,
 		"process_time", k.settings.processTime.String(),
 	)
 
-	sleepDuration := k.settings.maxPollInterval
+	sleepDuration := k.settings.maxReactionDelay
+	h := k.stats.poll_time
 	for {
 		select {
 		case <-ctx.Done():
@@ -308,7 +360,7 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 				default:
 				}
 
-				// t := time.Now()
+				t := time.Now()
 				result, err := k.store.PollPending(ctx, PollRequest{
 					Limit:           k.settings.batchSize,
 					Now:             time.Now(),
@@ -316,26 +368,22 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 					BackoffBase:     k.settings.backoffBase,
 					MaxBackoffDelay: k.settings.maxBackoffDelay,
 				})
-				// k.logger.InfoContext(ctx, "polled",
-				// 	"size", len(result.Tickets),
-				// 	"duration", time.Since(t).String(),
-				// 	"batch_size", k.settings.batchSize,
-				// 	"sleep_until", result.SleepUntil,
-				// )
 				if err != nil {
 					k.logger.ErrorContext(ctx, "error polling store", "error", err)
-					sleepDuration = k.settings.maxPollInterval
+					sleepDuration = k.settings.maxReactionDelay
 					break
 				}
 
+				h.Observe(time.Since(t))
+
 				if result.SleepUntil != nil {
 					sleepDuration = time.Until(*result.SleepUntil)
-					sleepDuration = min(sleepDuration, k.settings.maxPollInterval)
-					sleepDuration = max(sleepDuration, k.settings.minPollInterval)
+					sleepDuration = min(sleepDuration, k.settings.maxReactionDelay)
+					sleepDuration = max(sleepDuration, k.settings.minReactionDelay)
 					break
 				}
 				if len(result.Tickets) == 0 {
-					sleepDuration = k.settings.maxPollInterval
+					sleepDuration = k.settings.maxReactionDelay
 					break
 				}
 
@@ -391,7 +439,10 @@ func (k *Kharon) work(ctx context.Context, r *Router) {
 				continue
 			}
 
+			s := time.Now()
 			k.processTicket(ctx, r, t)
+			k.stats.process_time.Observe(time.Since(s))
+			k.stats.processed.value++
 		}
 	}
 }
@@ -412,7 +463,7 @@ func (k *Kharon) processTicket(ctx context.Context, r *Router, t *Ticket) {
 
 	rctx, cancel := context.WithDeadline(ctx, t.Runat)
 	defer cancel()
-	err := handler.ProcessTicket(rctx, *t)
+	err := handler.ProcessTicket(rctx, t)
 	if err != nil {
 		k.logger.ErrorContext(ctx, "error processing ticket",
 			"ticket_id", t.ID,

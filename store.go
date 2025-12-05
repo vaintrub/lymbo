@@ -3,6 +3,8 @@ package lymbo
 import (
 	"context"
 	"time"
+
+	"github.com/ochaton/lymbo/status"
 )
 
 type UpdateFunc func(context.Context, *Ticket) error
@@ -13,6 +15,14 @@ type PollRequest struct {
 	TTR             time.Duration
 	BackoffBase     float64
 	MaxBackoffDelay time.Duration
+}
+
+type UpdateSet struct {
+	Status      *status.Status
+	Nice        *int
+	Runat       *time.Time
+	Payload     any
+	ErrorReason any
 }
 
 // Store defines the interface for ticket storage and management.
@@ -34,6 +44,10 @@ type Store interface {
 	// Update modifies an existing ticket using the provided UpdateFunc.
 	// The UpdateFunc receives a pointer to the ticket to modify.
 	Update(context.Context, TicketId, UpdateFunc) error
+
+	// UpdateSet modifies an existing ticket using the provided UpdateSet.
+	// it does not fetch the ticket, the request is only Update.
+	UpdateSet(context.Context, TicketId, UpdateSet) error
 
 	// PollPending retrieves pending tickets ready for processing.
 	// Returns up to limit tickets sorted by priority (Runat, then Nice).

@@ -108,6 +108,44 @@ func (r *Tickets) Update(ctx context.Context, id lymbo.TicketId, fn lymbo.Update
 	return tx.Commit(ctx)
 }
 
+func (r *Tickets) UpdateSet(ctx context.Context, id lymbo.TicketId, us lymbo.UpdateSet) error {
+	uuid, err := uuid.Parse(id.String())
+	if err != nil {
+		return lymbo.ErrTicketIDInvalid
+	}
+
+	updateParams := sqlc.UpdateTicketParams{
+		ID: uuid,
+	}
+	if us.Status != nil {
+		updateParams.Status = sqlc.NullTicketStatus{TicketStatus: sqlc.TicketStatus(us.Status.String()), Valid: true}
+	}
+
+	if us.Nice != nil {
+		n := int16(*us.Nice)
+		updateParams.Nice = &n
+	}
+	if us.Runat != nil {
+		updateParams.Runat = pgtype.Timestamptz{Time: *us.Runat, Valid: true}
+	}
+	if us.Payload != nil {
+		payload, err := json.Marshal(us.Payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload: %w", err)
+		}
+		updateParams.Payload = payload
+	}
+	if us.ErrorReason != nil {
+		errorReason, err := json.Marshal(us.ErrorReason)
+		if err != nil {
+			return fmt.Errorf("failed to marshal error_reason: %w", err)
+		}
+		updateParams.ErrorReason = errorReason
+	}
+
+	return r.queries.UpdateTicket(ctx, updateParams)
+}
+
 func (r *Tickets) PollPending(ctx context.Context, req lymbo.PollRequest) (lymbo.PollResult, error) {
 	rows, err := r.queries.PollTickets(ctx, sqlc.PollTicketsParams{
 		Now:         pgtype.Timestamptz{Time: req.Now, Valid: true},

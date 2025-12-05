@@ -15,13 +15,13 @@ type Settings struct {
 	// Defaults to DefaultBackoffBase.
 	backoffBase float64
 
-	// maxPollInterval is the maximum time to wait between store polls.
+	// maxReactionDelay is the maximum time to wait between store polls.
 	// Defaults to MaxPollIntervalDefault.
-	maxPollInterval time.Duration
+	maxReactionDelay time.Duration
 
-	// minPollInterval is the minimum time to wait between store polls.
+	// minReactionDelay is the minimum time to wait between store polls.
 	// Defaults to MinPollIntervalDefault.
-	minPollInterval time.Duration
+	minReactionDelay time.Duration
 
 	// batchSize is the maximum number of tickets to poll at once.
 	// Defaults to 1, capped at Workers.
@@ -42,8 +42,8 @@ type Settings struct {
 func DefaultSettings() *Settings {
 	return &Settings{
 		processTime:        30 * time.Second,
-		maxPollInterval:    MaxPollIntervalDefault,
-		minPollInterval:    MinPollIntervalDefault,
+		maxReactionDelay:   MaxPollIntervalDefault,
+		minReactionDelay:   MinPollIntervalDefault,
 		maxBackoffDelay:    MaxBackoffDelay,
 		backoffBase:        DefaultBackoffBase,
 		batchSize:          10,
@@ -55,6 +55,11 @@ func DefaultSettings() *Settings {
 
 func (s *Settings) WithExpiration() *Settings {
 	s.enableExpiration = true
+	return s
+}
+
+func (s *Settings) WithExpirationInterval(d time.Duration) *Settings {
+	s.expirationInterval = d
 	return s
 }
 
@@ -85,13 +90,13 @@ func (s *Settings) WithBackoffBase(base float64) *Settings {
 	return s
 }
 
-func (s *Settings) WithMaxPollInterval(d time.Duration) *Settings {
-	s.maxPollInterval = d
+func (s *Settings) WithMaxReactionDelay(d time.Duration) *Settings {
+	s.maxReactionDelay = d
 	return s
 }
 
-func (s *Settings) WithMinPollInterval(d time.Duration) *Settings {
-	s.minPollInterval = d
+func (s *Settings) WithMinReactionDelay(d time.Duration) *Settings {
+	s.minReactionDelay = d
 	return s
 }
 
@@ -100,14 +105,14 @@ func (s *Settings) normalize() {
 	if s.workers <= 0 {
 		s.workers = 1
 	}
-	if s.maxPollInterval <= 0 {
-		s.maxPollInterval = MaxPollIntervalDefault
+	if s.maxReactionDelay <= 0 {
+		s.maxReactionDelay = MaxPollIntervalDefault
 	}
-	if s.minPollInterval <= 0 {
-		s.minPollInterval = MinPollIntervalDefault
+	if s.minReactionDelay <= 0 {
+		s.minReactionDelay = MinPollIntervalDefault
 	}
-	if s.maxPollInterval < s.minPollInterval {
-		s.maxPollInterval = s.minPollInterval
+	if s.maxReactionDelay < s.minReactionDelay {
+		s.maxReactionDelay = s.minReactionDelay
 	}
 	if s.batchSize <= 0 {
 		s.batchSize = 1

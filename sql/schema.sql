@@ -16,7 +16,8 @@ CREATE TABLE tickets (
 );
 
 -- Indexes
-CREATE INDEX idx_tickets_pending_runat_nice ON tickets (runat, nice, id);
+CREATE INDEX idx_tickets_pending_runat_nice ON tickets (runat, nice)
+WHERE status = 'pending';
 
 -- Trigger for tickets.mtime
 CREATE OR REPLACE FUNCTION tickets_update_mtime()

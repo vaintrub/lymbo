@@ -86,7 +86,6 @@ WITH rescheduled_tickets AS (
         SELECT t.id
         FROM tickets as t
         WHERE t.status = 'pending' AND t.runat <= $1::Timestamptz
-        ORDER BY t.runat ASC, t.nice ASC
         LIMIT $5
         FOR UPDATE SKIP LOCKED
     )
@@ -230,6 +229,39 @@ func (q *Queries) PutTicket(ctx context.Context, arg PutTicketParams) error {
 		arg.Attempts,
 		arg.Payload,
 		arg.ErrorReason,
+	)
+	return err
+}
+
+const updateTicket = `-- name: UpdateTicket :exec
+UPDATE tickets
+SET
+    status = COALESCE($1, status),
+    nice = COALESCE($2, nice),
+    runat = COALESCE($3, runat),
+    payload = COALESCE($4, payload),
+    error_reason = COALESCE($5, error_reason),
+    mtime = NOW()
+WHERE id = $6
+`
+
+type UpdateTicketParams struct {
+	Status      NullTicketStatus
+	Nice        *int16
+	Runat       pgtype.Timestamptz
+	Payload     []byte
+	ErrorReason []byte
+	ID          uuid.UUID
+}
+
+func (q *Queries) UpdateTicket(ctx context.Context, arg UpdateTicketParams) error {
+	_, err := q.db.Exec(ctx, updateTicket,
+		arg.Status,
+		arg.Nice,
+		arg.Runat,
+		arg.Payload,
+		arg.ErrorReason,
+		arg.ID,
 	)
 	return err
 }

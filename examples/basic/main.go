@@ -27,11 +27,12 @@ func main() {
 	logger := setupLogger()
 	settings := lymbo.DefaultSettings().
 		WithExpiration().
+		WithExpirationInterval(1 * time.Minute).
 		WithProcessTime(100 * time.Microsecond).
 		WithWorkers(32).
 		WithBatchSize(32).
-		WithMinPollInterval(100 * time.Microsecond).
-		WithMaxPollInterval(1 * time.Second)
+		WithMinReactionDelay(100 * time.Microsecond).
+		WithMaxReactionDelay(1 * time.Second)
 
 	var kh *lymbo.Kharon
 	dbtype := os.Getenv("DB_TYPE")
@@ -44,6 +45,7 @@ func main() {
 		kh = lymbo.NewKharon(memory.NewStore(), settings, logger)
 	default:
 		cf, err := pgxpool.ParseConfig(os.Getenv("DB_DSN"))
+		cf.MaxConns = 32
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to connect to pgpool", "error", err)
 			os.Exit(1)
@@ -59,14 +61,21 @@ func main() {
 	}
 
 	r := lymbo.NewRouter()
-	r.HandleFunc("example", func(ctx context.Context, t lymbo.Ticket) error {
-		slog.InfoContext(ctx, "processing ticket", "ticket_id", t.ID, "payload", t.Payload, "runat", t.Runat, "attempt", t.Attempts)
+	r.HandleFunc("ack", func(ctx context.Context, t *lymbo.Ticket) error {
 		return kh.Ack(ctx, t.ID)
 	})
-
-	r.NotFoundFunc(func(ctx context.Context, t lymbo.Ticket) error {
+	r.HandleFunc("fail", func(ctx context.Context, t *lymbo.Ticket) error {
+		return kh.Fail(ctx, t.ID)
+	})
+	r.HandleFunc("done", func(ctx context.Context, t *lymbo.Ticket) error {
+		return kh.Done(ctx, t.ID)
+	})
+	r.HandleFunc("cancel", func(ctx context.Context, t *lymbo.Ticket) error {
+		return kh.Cancel(ctx, t.ID)
+	})
+	r.NotFoundFunc(func(ctx context.Context, t *lymbo.Ticket) error {
 		slog.DebugContext(ctx, "unknown ticket type", "ticket_id", t.ID, "ticket_type", t.Type)
-		return kh.Fail(ctx, t.ID, lymbo.WithErrorReason("unsupported ticket type"))
+		return kh.Fail(ctx, t.ID, lymbo.WithErrorReason("unsupported ticket type"), lymbo.WithDelay(30*time.Second))
 	})
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -91,24 +100,31 @@ func main() {
 				stats := kh.Stats()
 				slog.InfoContext(ctx, "kharon stats",
 					"scheduled", stats.Scheduled,
-					"added", stats.Added,
 					"polled", stats.Polled,
-					"acked", stats.Acked,
-					"done", stats.Done,
-					"canceled", stats.Canceled,
+					"processed", stats.Processed,
 					"failed", stats.Failed,
 					"expired", stats.Expired,
+					"poll_min", stats.PollTime.Min.Milliseconds(),
+					"poll_max", stats.PollTime.Max.Milliseconds(),
+					"poll_avg", stats.PollTime.Avg.Milliseconds(),
+					"poll_p99", stats.PollTime.P99.Milliseconds(),
+					"poll_p999", stats.PollTime.P999.Milliseconds(),
+					"proc_min", stats.ProcessTime.Min.Milliseconds(),
+					"proc_max", stats.ProcessTime.Max.Milliseconds(),
+					"proc_avg", stats.ProcessTime.Avg.Milliseconds(),
+					"proc_p99", stats.ProcessTime.P99.Milliseconds(),
+					"proc_p999", stats.ProcessTime.P999.Milliseconds(),
 				)
 				// Evaluate rates
 				interval := time.Since(ts).Seconds()
 				if interval > 0 {
 					slog.InfoContext(ctx, "kharon rates",
 						"schedule_rate", hRate(float64(stats.Scheduled-prev.Scheduled)/interval),
-						"add_rate", hRate(float64(stats.Added-prev.Added)/interval),
+						// "add_rate", hRate(float64(stats.Added-prev.Added)/interval),
 						"poll_rate", hRate(float64(stats.Polled-prev.Polled)/interval),
 						"ack_rate", hRate(float64(stats.Acked-prev.Acked)/interval),
-						"done_rate", hRate(float64(stats.Done-prev.Done)/interval),
-						"cancel_rate", hRate(float64(stats.Canceled-prev.Canceled)/interval),
+						// "done_rate", hRate(float64(stats.Done-prev.Done)/interval),
+						// "cancel_rate", hRate(float64(stats.Canceled-prev.Canceled)/interval),
 						"fail_rate", hRate(float64(stats.Failed-prev.Failed)/interval),
 						"expire_rate", hRate(float64(stats.Expired-prev.Expired)/interval),
 					)
@@ -128,6 +144,7 @@ func main() {
 		CancelTicket: &CancelTicketHandler{kh},
 		DeleteTicket: &DeleteTicketHandler{kh},
 		AddTicket:    &AddTicketHandler{kh},
+		ResetStats:   &ResetStatsHandler{kh},
 	}
 	hs.Register(mux)
 
@@ -144,6 +161,7 @@ type Handlers struct {
 	CancelTicket *CancelTicketHandler
 	DeleteTicket *DeleteTicketHandler
 	AddTicket    *AddTicketHandler
+	ResetStats   *ResetStatsHandler
 }
 
 func (h *Handlers) Register(mux *http.ServeMux) {
@@ -151,6 +169,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.Handle(h.CancelTicket.Handle(), h.WithMiddleware(h.CancelTicket))
 	mux.Handle(h.DeleteTicket.Handle(), h.WithMiddleware(h.DeleteTicket))
 	mux.Handle(h.AddTicket.Handle(), h.WithMiddleware(h.AddTicket))
+	mux.Handle(h.ResetStats.Handle(), h.WithMiddleware(h.ResetStats))
 }
 
 type ResponseWriterWithStatus struct {
@@ -391,6 +410,19 @@ func runServer(ctx context.Context, server *http.Server, cancel context.CancelFu
 
 		slog.InfoContext(ctx, "HTTP server stopped gracefully")
 	}
+}
+
+type ResetStatsHandler struct {
+	kh *lymbo.Kharon
+}
+
+func (h *ResetStatsHandler) Handle() string {
+	return "POST /stats/reset"
+}
+
+func (h *ResetStatsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.kh.ResetStats()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func setupLogger() *slog.Logger {

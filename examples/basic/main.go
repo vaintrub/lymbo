@@ -27,7 +27,7 @@ func main() {
 	logger := setupLogger()
 	settings := lymbo.DefaultSettings().
 		WithExpiration().
-		WithExpirationInterval(1 * time.Minute).
+		WithExpirationInterval(1 * time.Second).
 		WithProcessTime(100 * time.Microsecond).
 		WithWorkers(32).
 		WithBatchSize(32).
@@ -57,6 +57,11 @@ func main() {
 			os.Exit(1)
 		}
 		store := postgres.NewTicketsRepository(pool)
+		if err := store.Migrate(ctx); err != nil {
+			slog.ErrorContext(ctx, "failed to migrate database", "error", err)
+			os.Exit(1)
+		}
+		slog.InfoContext(ctx, "migration complete")
 		kh = lymbo.NewKharon(store, settings, logger)
 	}
 
@@ -65,7 +70,7 @@ func main() {
 		return kh.Ack(ctx, t.ID)
 	})
 	r.HandleFunc("fail", func(ctx context.Context, t *lymbo.Ticket) error {
-		return kh.Fail(ctx, t.ID)
+		return kh.Fail(ctx, t.ID, lymbo.WithErrorReason("failed by handler"), lymbo.WithDelay(10*time.Second))
 	})
 	r.HandleFunc("done", func(ctx context.Context, t *lymbo.Ticket) error {
 		return kh.Done(ctx, t.ID)

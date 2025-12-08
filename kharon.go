@@ -39,13 +39,20 @@ const (
 	maxUnix          int64 = maxInt64 - unixToInternal
 )
 
+type result struct {
+	tid  TicketId
+	s    status.Status
+	opts Opts
+}
+
 // Kharon is the main orchestrator for the job processing system.
 // It coordinates polling, dispatching, and processing of tickets.
 type Kharon struct {
 	store    Store
 	settings Settings
 	logger   *slog.Logger
-	bus      chan *Ticket
+	income   chan *Ticket
+	outcome  chan *Ticket
 
 	stats *stats
 }
@@ -138,7 +145,7 @@ func NewKharon(store Store, s *Settings, logger *slog.Logger) *Kharon {
 		store:    store,
 		settings: *s,
 		logger:   logger,
-		bus:      make(chan *Ticket),
+		income:   make(chan *Ticket),
 		stats:    newStats(),
 	}
 }
@@ -192,12 +199,14 @@ func toOpts(opts ...Option) *Opts {
 	for _, opt := range opts {
 		opt(o)
 	}
-	if o.delay > 0 {
-		t := time.Now().Add(o.delay)
-		o.runat = t
+	delay := o.delay
+	if delay == 0 {
+		delay = 100 * 365 * 24 * time.Hour // default to "infinity"
+	}
+	if o.runat.IsZero() {
+		o.runat = time.Now().Add(delay)
 	} else {
-		// If delay is not set and status is not pending, set Runat to infinity
-		o.runat = time.Unix(maxUnix, 0)
+		o.runat = o.runat.Add(delay)
 	}
 	return o
 }
@@ -318,7 +327,7 @@ func (k *Kharon) Stats() Stats {
 func (k *Kharon) Run(ctx context.Context, r *Router) error {
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	defer close(k.bus)
+	defer close(k.income)
 
 	for range k.settings.workers {
 		go k.work(wctx, r)
@@ -376,7 +385,7 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 				k.stats.polled.value += int64(len(result.Tickets))
 
 				for _, t := range result.Tickets {
-					k.bus <- &t
+					k.income <- &t
 					k.stats.scheduled.value++
 				}
 			}
@@ -416,7 +425,7 @@ func (k *Kharon) work(ctx context.Context, r *Router) {
 		select {
 		case <-ctx.Done():
 			return
-		case t, ok := <-k.bus:
+		case t, ok := <-k.income:
 			if !ok {
 				return
 			}

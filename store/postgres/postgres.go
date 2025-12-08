@@ -1,7 +1,24 @@
+// Package postgres provides a PostgreSQL implementation of the lymbo.Store interface.
+// It uses raw pgx queries without any code generation or migration tools.
+//
+// Usage:
+//
+//	pool, _ := pgxpool.New(ctx, dsn)
+//	store := postgres.NewTicketsRepository(pool)
+//	store.Migrate(ctx)  // Run migrations to set up schema
+//
+// For custom table names:
+//
+//	store := postgres.NewTicketsRepositoryWithConfig(postgres.Config{
+//		TableName: "my_tickets",
+//		Pool:      pool,
+//	})
+//	store.Migrate(ctx)
 package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,29 +31,91 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ochaton/lymbo"
 	"github.com/ochaton/lymbo/status"
-	"github.com/ochaton/lymbo/store/postgres/sqlc"
 )
 
+type Config struct {
+	TableName string
+	Pool      *pgxpool.Pool
+}
+
 type Tickets struct {
-	db      *pgxpool.Pool
-	queries *sqlc.Queries
+	db        *pgxpool.Pool
+	queries   *Queries
+	tableName string
 }
 
 var _ lymbo.Store = &Tickets{}
 
-func NewTicketsRepository(db *pgxpool.Pool) *Tickets {
-	return &Tickets{
-		db:      db,
-		queries: sqlc.New(db),
+func NewTicketsRepository(pool *pgxpool.Pool) *Tickets {
+	t, err := NewTicketsRepositoryWithConfig(Config{
+		TableName: "tickets",
+		Pool:      pool,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("failed to create tickets repository: %v", err))
 	}
+	return t
+}
+
+func NewTicketsRepositoryWithConfig(cfg Config) (*Tickets, error) {
+	if cfg.TableName == "" {
+		cfg.TableName = `tickets`
+	}
+
+	queries, err := newQueries(cfg.TableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize query templates: %w", err)
+	}
+
+	return &Tickets{
+		db:        cfg.Pool,
+		tableName: cfg.TableName,
+		queries:   queries,
+	}, nil
+}
+
+// Migrate runs the embedded migrations to set up the database schema
+// All migrations are executed in a single transaction to ensure atomicity
+func (r *Tickets) Migrate(ctx context.Context) error {
+	slog.InfoContext(ctx, "Applying migration", "sql", r.queries.migrate)
+	_, err := r.db.Exec(ctx, r.queries.migrate)
+	if err != nil {
+		return fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	return nil
 }
 
 func (r *Tickets) Get(ctx context.Context, id lymbo.TicketId) (lymbo.Ticket, error) {
-	uuid, err := uuid.Parse(id.String())
+	ticketUUID, err := uuid.Parse(id.String())
 	if err != nil {
 		return lymbo.Ticket{}, lymbo.ErrTicketIDInvalid
 	}
-	row, err := r.queries.GetTicket(ctx, uuid)
+
+	var (
+		statusStr   string
+		runat       pgtype.Timestamptz
+		nice        int16
+		ticketType  string
+		ctime       pgtype.Timestamptz
+		mtime       pgtype.Timestamptz
+		attempts    int32
+		payload     []byte
+		errorReason []byte
+	)
+
+	err = r.db.QueryRow(ctx, r.queries.get, ticketUUID).Scan(
+		&ticketUUID,
+		&statusStr,
+		&runat,
+		&nice,
+		&ticketType,
+		&ctime,
+		&mtime,
+		&attempts,
+		&payload,
+		&errorReason,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return lymbo.Ticket{}, lymbo.ErrTicketNotFound
@@ -44,32 +123,87 @@ func (r *Tickets) Get(ctx context.Context, id lymbo.TicketId) (lymbo.Ticket, err
 		return lymbo.Ticket{}, err
 	}
 
-	return toLymboTicket(row)
+	s, err := status.FromString(statusStr)
+	if err != nil {
+		return lymbo.Ticket{}, err
+	}
+
+	var mtimePtr *time.Time
+	if mtime.Valid {
+		mtimePtr = &mtime.Time
+	}
+
+	return lymbo.Ticket{
+		ID:          lymbo.TicketId(ticketUUID.String()),
+		Status:      s,
+		Runat:       runat.Time,
+		Nice:        int(nice),
+		Type:        ticketType,
+		Ctime:       ctime.Time,
+		Mtime:       mtimePtr,
+		Attempts:    int(attempts),
+		Payload:     payload,
+		ErrorReason: errorReason,
+	}, nil
 }
 
 func (r *Tickets) Put(ctx context.Context, ticket lymbo.Ticket) error {
-	req, err := toPostgresTicket(ticket)
-	if err != nil {
-		return err
-	}
-	return r.queries.PutTicket(ctx, req)
-}
-
-func (r *Tickets) Delete(ctx context.Context, id lymbo.TicketId) error {
-	uuid, err := uuid.Parse(id.String())
+	ticketUUID, err := uuid.Parse(ticket.ID.String())
 	if err != nil {
 		return lymbo.ErrTicketIDInvalid
 	}
-	err = r.queries.DeleteTicket(ctx, uuid)
+
+	var payload []byte
+	if ticket.Payload != nil {
+		payload, err = json.Marshal(ticket.Payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload: %w", err)
+		}
+	}
+
+	var errorReason []byte
+	if ticket.ErrorReason != nil {
+		errorReason, err = json.Marshal(ticket.ErrorReason)
+		if err != nil {
+			return fmt.Errorf("failed to marshal error_reason: %w", err)
+		}
+	}
+
+	var mtime pgtype.Timestamptz
+	if ticket.Mtime != nil {
+		mtime = pgtype.Timestamptz{Time: *ticket.Mtime, Valid: true}
+	}
+
+	_, err = r.db.Exec(ctx, r.queries.put,
+		ticketUUID,
+		ticket.Status.String(),
+		pgtype.Timestamptz{Time: ticket.Runat, Valid: true},
+		int16(ticket.Nice),
+		ticket.Type,
+		pgtype.Timestamptz{Time: ticket.Ctime, Valid: true},
+		mtime,
+		int32(ticket.Attempts),
+		payload,
+		errorReason,
+	)
+	return err
+}
+
+func (r *Tickets) Delete(ctx context.Context, id lymbo.TicketId) error {
+	ticketUUID, err := uuid.Parse(id.String())
+	if err != nil {
+		return lymbo.ErrTicketIDInvalid
+	}
+
+	_, err = r.db.Exec(ctx, r.queries.delete, ticketUUID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// not found, means was deleted sometime
 		return nil
 	}
 	return err
 }
 
 func (r *Tickets) Update(ctx context.Context, id lymbo.TicketId, fn lymbo.UpdateFunc) error {
-	uuid, err := uuid.Parse(id.String())
+	ticketUUID, err := uuid.Parse(id.String())
 	if err != nil {
 		return lymbo.ErrTicketIDInvalid
 	}
@@ -80,7 +214,30 @@ func (r *Tickets) Update(ctx context.Context, id lymbo.TicketId, fn lymbo.Update
 	}
 	defer tx.Rollback(ctx)
 
-	row, err := r.queries.WithTx(tx).GetTicket(ctx, uuid)
+	var (
+		statusStr   string
+		runat       pgtype.Timestamptz
+		nice        int16
+		ticketType  string
+		ctime       pgtype.Timestamptz
+		mtime       pgtype.Timestamptz
+		attempts    int32
+		payload     []byte
+		errorReason []byte
+	)
+
+	err = tx.QueryRow(ctx, r.queries.get, ticketUUID).Scan(
+		&ticketUUID,
+		&statusStr,
+		&runat,
+		&nice,
+		&ticketType,
+		&ctime,
+		&mtime,
+		&attempts,
+		&payload,
+		&errorReason,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return lymbo.ErrTicketNotFound
@@ -88,120 +245,223 @@ func (r *Tickets) Update(ctx context.Context, id lymbo.TicketId, fn lymbo.Update
 		return err
 	}
 
-	ticket, err := toLymboTicket(row)
+	s, err := status.FromString(statusStr)
 	if err != nil {
 		return err
+	}
+
+	var mtimePtr *time.Time
+	if mtime.Valid {
+		mtimePtr = &mtime.Time
+	}
+
+	ticket := lymbo.Ticket{
+		ID:          lymbo.TicketId(ticketUUID.String()),
+		Status:      s,
+		Runat:       runat.Time,
+		Nice:        int(nice),
+		Type:        ticketType,
+		Ctime:       ctime.Time,
+		Mtime:       mtimePtr,
+		Attempts:    int(attempts),
+		Payload:     payload,
+		ErrorReason: errorReason,
 	}
 
 	if err := fn(ctx, &ticket); err != nil {
 		return err
 	}
 
-	req, err := toPostgresTicket(ticket)
+	// Re-marshal payload and error_reason
+	var updatedPayload []byte
+	if ticket.Payload != nil {
+		updatedPayload, err = json.Marshal(ticket.Payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload: %w", err)
+		}
+	}
+
+	var updatedErrorReason []byte
+	if ticket.ErrorReason != nil {
+		updatedErrorReason, err = json.Marshal(ticket.ErrorReason)
+		if err != nil {
+			return fmt.Errorf("failed to marshal error_reason: %w", err)
+		}
+	}
+
+	var updatedMtime pgtype.Timestamptz
+	if ticket.Mtime != nil {
+		updatedMtime = pgtype.Timestamptz{Time: *ticket.Mtime, Valid: true}
+	}
+
+	_, err = tx.Exec(ctx, r.queries.put,
+		ticketUUID,
+		ticket.Status.String(),
+		pgtype.Timestamptz{Time: ticket.Runat, Valid: true},
+		int16(ticket.Nice),
+		ticket.Type,
+		pgtype.Timestamptz{Time: ticket.Ctime, Valid: true},
+		updatedMtime,
+		int32(ticket.Attempts),
+		updatedPayload,
+		updatedErrorReason,
+	)
 	if err != nil {
 		return err
 	}
 
-	if err := r.queries.WithTx(tx).PutTicket(ctx, req); err != nil {
-		return err
-	}
 	return tx.Commit(ctx)
 }
 
+type updateSetParams struct {
+	id           uuid.UUID      // $1
+	status       sql.NullString // $2
+	nice         sql.NullInt16  // $3
+	runat        sql.NullTime   // $4
+	payload      []byte         // $5
+	error_reason []byte         // $6
+}
+
 func (r *Tickets) UpdateSet(ctx context.Context, id lymbo.TicketId, us lymbo.UpdateSet) error {
-	uuid, err := uuid.Parse(id.String())
+	ticketUUID, err := uuid.Parse(id.String())
 	if err != nil {
 		return lymbo.ErrTicketIDInvalid
 	}
 
-	updateParams := sqlc.UpdateTicketParams{
-		ID: uuid,
-	}
-	if us.Status != nil {
-		updateParams.Status = sqlc.NullTicketStatus{TicketStatus: sqlc.TicketStatus(us.Status.String()), Valid: true}
+	usp := updateSetParams{
+		id: ticketUUID,
 	}
 
+	if us.Status != nil {
+		usp.status = sql.NullString{String: us.Status.String(), Valid: true}
+	}
 	if us.Nice != nil {
-		n := int16(*us.Nice)
-		updateParams.Nice = &n
+		usp.nice = sql.NullInt16{Int16: int16(*us.Nice), Valid: true}
 	}
 	if us.Runat != nil {
-		updateParams.Runat = pgtype.Timestamptz{Time: *us.Runat, Valid: true}
+		usp.runat = sql.NullTime{Time: *us.Runat, Valid: true}
 	}
 	if us.Payload != nil {
 		payload, err := json.Marshal(us.Payload)
 		if err != nil {
 			return fmt.Errorf("failed to marshal payload: %w", err)
 		}
-		updateParams.Payload = payload
+		usp.payload = payload
 	}
 	if us.ErrorReason != nil {
 		errorReason, err := json.Marshal(us.ErrorReason)
 		if err != nil {
 			return fmt.Errorf("failed to marshal error_reason: %w", err)
 		}
-		updateParams.ErrorReason = errorReason
+		usp.error_reason = errorReason
 	}
 
-	return r.queries.UpdateTicket(ctx, updateParams)
+	_, err = r.db.Exec(ctx, r.queries.update,
+		usp.id,
+		usp.status,
+		usp.nice,
+		usp.runat,
+		usp.payload,
+		usp.error_reason,
+	)
+	return err
+}
+
+type pollPendingParams struct {
+	now         pgtype.Timestamptz
+	ttr         int32
+	maxDelay    int32
+	backoffBase float64
+	limit       int32
 }
 
 func (r *Tickets) PollPending(ctx context.Context, req lymbo.PollRequest) (lymbo.PollResult, error) {
-	rows, err := r.queries.PollTickets(ctx, sqlc.PollTicketsParams{
-		Now:         pgtype.Timestamptz{Time: req.Now, Valid: true},
-		Ttr:         int32(req.TTR.Seconds()),
-		MaxDelay:    int32(req.MaxBackoffDelay.Seconds()),
-		BackoffBase: req.BackoffBase,
-		Lim:         int32(req.Limit),
-	})
-
+	dto := pollPendingParams{
+		now:         pgtype.Timestamptz{Valid: true, Time: req.Now},
+		ttr:         int32(req.TTR.Seconds()),
+		maxDelay:    int32(req.MaxBackoffDelay.Seconds()),
+		backoffBase: req.BackoffBase,
+		limit:       int32(req.Limit),
+	}
+	rows, err := r.db.Query(ctx, r.queries.poll,
+		dto.now,
+		dto.ttr,
+		dto.maxDelay,
+		dto.backoffBase,
+		dto.limit,
+	)
 	if err != nil {
 		return lymbo.PollResult{}, err
 	}
-
-	convert := func(d sqlc.PollTicketsRow) (lymbo.Ticket, error) {
-		s, err := status.FromString(d.Status)
-		if err != nil {
-			return lymbo.Ticket{}, err
-		}
-		var mtime *time.Time
-		if d.Mtime.Valid {
-			mtime = &d.Mtime.Time
-		}
-		return lymbo.Ticket{
-			ID:          lymbo.TicketId(d.ID.String()),
-			Status:      s,
-			Runat:       d.Runat.Time,
-			Nice:        int(d.Nice),
-			Type:        d.Type,
-			Ctime:       d.Ctime.Time,
-			Mtime:       mtime,
-			Attempts:    int(d.Attempts),
-			Payload:     d.Payload,
-			ErrorReason: d.ErrorReason,
-		}, nil
-	}
+	defer rows.Close()
 
 	var sleepUntil *time.Time
-	tickets := make([]lymbo.Ticket, 0, len(rows))
+	tickets := make([]lymbo.Ticket, 0)
 
-	for _, row := range rows {
-		switch row.Ticket {
+	for rows.Next() {
+		var (
+			rowType     string
+			id          uuid.UUID
+			statusStr   string
+			runat       pgtype.Timestamptz
+			nice        int16
+			ticketType  string
+			ctime       pgtype.Timestamptz
+			mtime       pgtype.Timestamptz
+			attempts    int32
+			payload     []byte
+			errorReason []byte
+		)
+
+		err := rows.Scan(
+			&rowType,
+			&id,
+			&statusStr,
+			&runat,
+			&nice,
+			&ticketType,
+			&ctime,
+			&mtime,
+			&attempts,
+			&payload,
+			&errorReason,
+		)
+		if err != nil {
+			return lymbo.PollResult{}, err
+		}
+
+		switch rowType {
 		case "ticket":
-			t, err := convert(row)
+			s, err := status.FromString(statusStr)
 			if err != nil {
-				// WARN?
-				slog.WarnContext(ctx, "failed to convert ticket in PollPending", "error", err, "ticket_id", row.ID.String())
+				slog.WarnContext(ctx, "failed to convert ticket in PollPending", "error", err, "ticket_id", id.String())
 				continue
 			}
-			tickets = append(tickets, t)
+			var mtimePtr *time.Time
+			if mtime.Valid {
+				mtimePtr = &mtime.Time
+			}
+			tickets = append(tickets, lymbo.Ticket{
+				ID:          lymbo.TicketId(id.String()),
+				Status:      s,
+				Runat:       runat.Time,
+				Nice:        int(nice),
+				Type:        ticketType,
+				Ctime:       ctime.Time,
+				Mtime:       mtimePtr,
+				Attempts:    int(attempts),
+				Payload:     payload,
+				ErrorReason: errorReason,
+			})
 		case "future_ticket":
-			// we can evaluate sleepUntil here
-			sleepUntil = &row.Runat.Time
+			sleepUntil = &runat.Time
 		default:
-			// unknown row type?
-			slog.WarnContext(ctx, "unknown row type PollPending", "row_type", row.Ticket, "ticket_id", row.ID.String())
+			slog.WarnContext(ctx, "unknown row type PollPending", "row_type", rowType, "ticket_id", id.String())
 		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return lymbo.PollResult{}, err
 	}
 
 	return lymbo.PollResult{
@@ -211,74 +471,12 @@ func (r *Tickets) PollPending(ctx context.Context, req lymbo.PollRequest) (lymbo
 }
 
 func (r *Tickets) ExpireTickets(ctx context.Context, limit int, now time.Time) (int64, error) {
-	res, err := r.queries.ExpireTickets(ctx, sqlc.ExpireTicketsParams{
-		ExpireBefore: pgtype.Timestamptz{Time: now, Valid: true},
-		Lim:          int32(limit),
-	})
+	res, err := r.db.Exec(ctx, r.queries.expire,
+		pgtype.Timestamptz{Time: now, Valid: true},
+		int32(limit),
+	)
 	if err != nil {
 		return 0, err
 	}
 	return res.RowsAffected(), nil
-}
-
-func toPostgresTicket(t lymbo.Ticket) (sqlc.PutTicketParams, error) {
-	var id uuid.UUID
-	var mtime pgtype.Timestamptz
-	var payload []byte
-	var errorReason []byte
-	var err error
-	id, err = uuid.Parse(t.ID.String())
-	if err != nil {
-		return sqlc.PutTicketParams{}, lymbo.ErrTicketIDInvalid
-	}
-	if mt := t.Mtime; mt != nil {
-		mtime = pgtype.Timestamptz{Time: *mt, Valid: true}
-	}
-	if t.Payload != nil {
-		payload, err = json.Marshal(t.Payload)
-		if err != nil {
-			return sqlc.PutTicketParams{}, fmt.Errorf("failed to marshal payload: %w", err)
-		}
-	}
-	if t.ErrorReason != nil {
-		errorReason, err = json.Marshal(t.ErrorReason)
-		if err != nil {
-			return sqlc.PutTicketParams{}, fmt.Errorf("failed to marshal error_reason: %w", err)
-		}
-	}
-	return sqlc.PutTicketParams{
-		ID:          id,
-		Status:      t.Status.String(),
-		Runat:       pgtype.Timestamptz{Time: t.Runat, Valid: true},
-		Nice:        int16(t.Nice),
-		Type:        t.Type,
-		Ctime:       pgtype.Timestamptz{Time: t.Ctime, Valid: true},
-		Mtime:       mtime,
-		Attempts:    int32(t.Attempts),
-		Payload:     payload,
-		ErrorReason: errorReason,
-	}, nil
-}
-
-func toLymboTicket(dto sqlc.GetTicketRow) (lymbo.Ticket, error) {
-	s, err := status.FromString(dto.Status)
-	if err != nil {
-		return lymbo.Ticket{}, err
-	}
-	var mtime *time.Time
-	if dto.Mtime.Valid {
-		mtime = &dto.Mtime.Time
-	}
-	return lymbo.Ticket{
-		ID:          lymbo.TicketId(dto.ID.String()),
-		Status:      s,
-		Runat:       dto.Runat.Time,
-		Nice:        int(dto.Nice),
-		Type:        dto.Type,
-		Ctime:       dto.Ctime.Time,
-		Mtime:       mtime,
-		Attempts:    int(dto.Attempts),
-		Payload:     dto.Payload,
-		ErrorReason: dto.ErrorReason,
-	}, nil
 }

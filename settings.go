@@ -35,7 +35,11 @@ type Settings struct {
 	enableExpiration bool
 
 	// expirationInterval
-	expirationInterval time.Duration ``
+	expirationInterval time.Duration
+
+	// shutdownTimeout is the maximum time to wait for graceful shutdown.
+	// Defaults to ShutdownTimeoutDefault.
+	shutdownTimeout time.Duration
 }
 
 // DefaultSettings returns a Settings instance with sensible defaults.
@@ -50,6 +54,7 @@ func DefaultSettings() *Settings {
 		workers:            4,
 		enableExpiration:   true,
 		expirationInterval: ExpirationInterval,
+		shutdownTimeout:    ShutdownTimeoutDefault,
 	}
 }
 
@@ -97,6 +102,11 @@ func (s *Settings) WithMaxReactionDelay(d time.Duration) *Settings {
 
 func (s *Settings) WithMinReactionDelay(d time.Duration) *Settings {
 	s.minReactionDelay = d
+	return s
+}
+
+func (s *Settings) WithShutdownTimeout(d time.Duration) *Settings {
+	s.shutdownTimeout = d
 	return s
 }
 

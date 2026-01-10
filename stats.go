@@ -1,7 +1,9 @@
 package lymbo
 
+import "sync/atomic"
+
 type counter struct {
-	value int64
+	value atomic.Int64
 }
 
 type stats struct {
@@ -49,15 +51,15 @@ func newStats() *stats {
 }
 
 func (s *stats) reset() {
-	s.added.value = 0
-	s.polled.value = 0
-	s.scheduled.value = 0
-	s.acked.value = 0
-	s.failed.value = 0
-	s.done.value = 0
-	s.retried.value = 0
-	s.canceled.value = 0
-	s.deleted.value = 0
-	s.expired.value = 0
-	s.processed.value = 0
+	s.added.value.Store(0)
+	s.polled.value.Store(0)
+	s.scheduled.value.Store(0)
+	s.acked.value.Store(0)
+	s.failed.value.Store(0)
+	s.done.value.Store(0)
+	s.retried.value.Store(0)
+	s.canceled.value.Store(0)
+	s.deleted.value.Store(0)
+	s.expired.value.Store(0)
+	s.processed.value.Store(0)
 }

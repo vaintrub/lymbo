@@ -7,46 +7,64 @@ type counter struct {
 }
 
 type stats struct {
-	added     *counter
-	polled    *counter
-	scheduled *counter
-	acked     *counter
-	failed    *counter
-	done      *counter
-	retried   *counter
-	canceled  *counter
-	deleted   *counter
-	expired   *counter
-	processed *counter
+	added          *counter
+	polled         *counter
+	scheduled      *counter
+	acked          *counter
+	failed         *counter
+	done           *counter
+	retried        *counter
+	canceled       *counter
+	deleted        *counter
+	expired        *counter
+	processed      *counter
+	runningWorkers *counter
 }
 
+// Stats contains counters for tracking ticket processing activity.
+// All fields except RunningWorkers are cumulative counters that can be reset via ResetStats().
 type Stats struct {
-	Added     int64 `json:"added"`
-	Polled    int64 `json:"polled"`
+	// Added is the number of tickets added to the store via Put().
+	Added int64 `json:"added"`
+	// Polled is the number of tickets fetched from the store by the poller.
+	Polled int64 `json:"polled"`
+	// Scheduled is the number of tickets sent to workers for processing.
 	Scheduled int64 `json:"scheduled"`
-	Acked     int64 `json:"acked"`
-	Failed    int64 `json:"failed"`
-	Done      int64 `json:"done"`
-	Retried   int64 `json:"retried"`
-	Canceled  int64 `json:"canceled"`
-	Deleted   int64 `json:"deleted"`
-	Expired   int64 `json:"expired"`
+	// Acked is the number of tickets acknowledged (successfully completed and removed).
+	Acked int64 `json:"acked"`
+	// Failed is the number of tickets marked as failed.
+	Failed int64 `json:"failed"`
+	// Done is the number of tickets marked as done (completed but kept in store).
+	Done int64 `json:"done"`
+	// Retried is the number of tickets rescheduled for retry.
+	Retried int64 `json:"retried"`
+	// Canceled is the number of tickets canceled.
+	Canceled int64 `json:"canceled"`
+	// Deleted is the number of tickets explicitly deleted via Delete().
+	Deleted int64 `json:"deleted"`
+	// Expired is the number of tickets removed due to expiration.
+	Expired int64 `json:"expired"`
+	// Processed is the number of tickets that have been processed by workers.
 	Processed int64 `json:"processed"`
+	// RunningWorkers is the current number of active worker goroutines.
+	// This is a gauge (current state), not a cumulative counter, and is not affected by ResetStats().
+	RunningWorkers int64 `json:"runningWorkers"`
 }
 
 func newStats() *stats {
 	return &stats{
-		added:     &counter{},
-		polled:    &counter{},
-		scheduled: &counter{},
-		acked:     &counter{},
-		failed:    &counter{},
-		done:      &counter{},
-		retried:   &counter{},
-		canceled:  &counter{},
-		deleted:   &counter{},
-		expired:   &counter{},
-		processed: &counter{},
+		added:          &counter{},
+		polled:         &counter{},
+		scheduled:      &counter{},
+		acked:          &counter{},
+		failed:         &counter{},
+		done:           &counter{},
+		retried:        &counter{},
+		canceled:       &counter{},
+		deleted:        &counter{},
+		expired:        &counter{},
+		processed:      &counter{},
+		runningWorkers: &counter{},
 	}
 }
 

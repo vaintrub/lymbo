@@ -234,17 +234,18 @@ func (k *Kharon) Get(ctx context.Context, tid TicketId) (Ticket, error) {
 
 func (k *Kharon) Stats() Stats {
 	return Stats{
-		Added:     k.stats.added.value.Load(),
-		Polled:    k.stats.polled.value.Load(),
-		Scheduled: k.stats.scheduled.value.Load(),
-		Acked:     k.stats.acked.value.Load(),
-		Failed:    k.stats.failed.value.Load(),
-		Done:      k.stats.done.value.Load(),
-		Retried:   k.stats.retried.value.Load(),
-		Canceled:  k.stats.canceled.value.Load(),
-		Deleted:   k.stats.deleted.value.Load(),
-		Expired:   k.stats.expired.value.Load(),
-		Processed: k.stats.processed.value.Load(),
+		Added:          k.stats.added.value.Load(),
+		Polled:         k.stats.polled.value.Load(),
+		Scheduled:      k.stats.scheduled.value.Load(),
+		Acked:          k.stats.acked.value.Load(),
+		Failed:         k.stats.failed.value.Load(),
+		Done:           k.stats.done.value.Load(),
+		Retried:        k.stats.retried.value.Load(),
+		Canceled:       k.stats.canceled.value.Load(),
+		Deleted:        k.stats.deleted.value.Load(),
+		Expired:        k.stats.expired.value.Load(),
+		Processed:      k.stats.processed.value.Load(),
+		RunningWorkers: k.stats.runningWorkers.value.Load(),
 	}
 }
 
@@ -297,7 +298,9 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 // runWorker processes tickets from income channel.
 // Exits when ctx is cancelled.
 func (k *Kharon) runWorker(ctx context.Context, r *Router, wg *sync.WaitGroup) {
+	k.stats.runningWorkers.value.Add(1)
 	defer wg.Done()
+	defer k.stats.runningWorkers.value.Add(-1)
 	defer k.logger.DebugContext(ctx, "worker exiting")
 
 	for {

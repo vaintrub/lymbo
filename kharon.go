@@ -23,9 +23,6 @@ const (
 
 	// ExpirationInterval is how often to run the expiration worker.
 	ExpirationInterval = 100 * time.Millisecond
-
-	// ShutdownTimeoutDefault is the default timeout for graceful shutdown.
-	ShutdownTimeoutDefault = 30 * time.Second
 )
 
 const (
@@ -255,32 +252,27 @@ func (k *Kharon) Stats() Stats {
 // It spawns worker goroutines and begins polling for tickets to process.
 // Returns when ctx is cancelled or an error occurs.
 //
-// Shutdown sequence:
-// 1. ctx cancelled → poller exits
-// 2. close(income) → workers drain and exit
-// 3. close(outcome) → pusher drains and exits
+// On shutdown, all goroutines exit immediately. In-flight tickets are not
+// drained since they are persisted and will be reprocessed on next startup.
 func (k *Kharon) Run(ctx context.Context, r *Router) error {
-	var workersWg sync.WaitGroup
-	var pusherWg sync.WaitGroup
+	var wg sync.WaitGroup
 
-	// Start pusher first (must be ready to receive from workers)
-	pusherWg.Add(1)
-	go k.runPusher(ctx, &pusherWg)
+	// Start pusher
+	wg.Add(1)
+	go k.runPusher(ctx, &wg)
 
 	// Start workers
 	for i := 0; i < k.settings.workers; i++ {
-		workersWg.Add(1)
-		go k.runWorker(ctx, r, &workersWg)
+		wg.Add(1)
+		go k.runWorker(ctx, r, &wg)
 	}
 
-	// Start expiration worker (independent, uses its own context)
-	expirationCtx, cancelExpiration := context.WithCancel(ctx)
-	var expirationWg sync.WaitGroup
+	// Start expiration worker
 	if k.settings.enableExpiration {
-		expirationWg.Add(1)
+		wg.Add(1)
 		go func() {
-			defer expirationWg.Done()
-			k.runExpirationWorker(expirationCtx)
+			defer wg.Done()
+			k.runExpirationWorker(ctx)
 		}()
 	}
 
@@ -295,66 +287,32 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 	// Run main polling loop (blocks until ctx cancelled)
 	pollErr := k.runPoller(ctx)
 
-	// === SHUTDOWN SEQUENCE ===
-	k.logger.InfoContext(ctx, "initiating shutdown...")
-
-	// 1. Stop expiration worker
-	cancelExpiration()
-	expirationWg.Wait()
-
-	// 2. Close income → workers will drain and exit
-	close(k.income)
-
-	// 3. Wait for workers (with timeout)
-	k.waitWithTimeout(&workersWg, "workers")
-
-	// 4. Close outcome → pusher will drain and exit
-	close(k.outcome)
-
-	// 5. Wait for pusher (with timeout)
-	k.waitWithTimeout(&pusherWg, "pusher")
+	// Wait for all goroutines to exit
+	wg.Wait()
 
 	k.logger.InfoContext(ctx, "shutdown complete")
 	return pollErr
 }
 
-// waitWithTimeout waits for WaitGroup with a timeout to prevent hanging.
-func (k *Kharon) waitWithTimeout(wg *sync.WaitGroup, name string) {
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		k.logger.DebugContext(context.Background(), name+" finished gracefully")
-	case <-time.After(k.settings.shutdownTimeout):
-		k.logger.WarnContext(context.Background(), name+" shutdown timeout exceeded")
-	}
-}
-
 // runWorker processes tickets from income channel.
-// Exits when income channel is closed (not on ctx.Done).
-// This ensures all queued tickets are processed during shutdown.
+// Exits when ctx is cancelled.
 func (k *Kharon) runWorker(ctx context.Context, r *Router, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer k.logger.DebugContext(ctx, "worker exiting")
 
-	// for range exits when channel is closed
-	for t := range k.income {
-		if t == nil {
-			k.logger.WarnContext(ctx, "received nil ticket")
-			continue
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-k.income:
+			k.processTicket(ctx, r, t)
+			k.stats.processed.value.Add(1)
 		}
-		k.processTicket(ctx, r, t)
-		k.stats.processed.value.Add(1)
 	}
 }
 
 // runPusher batches and persists updates from outcome channel.
-// Exits when outcome channel is closed (not on ctx.Done).
-// This ensures all pending updates are flushed during shutdown.
+// Exits when ctx is cancelled, flushing any remaining batch.
 func (k *Kharon) runPusher(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer k.logger.DebugContext(ctx, "pusher exiting")
@@ -362,13 +320,14 @@ func (k *Kharon) runPusher(ctx context.Context, wg *sync.WaitGroup) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	// Track in-flight batch operations for graceful shutdown
-	var batchWg sync.WaitGroup
-	defer batchWg.Wait()
+	// Track in-flight async flush goroutines
+	var flushWg sync.WaitGroup
+	defer flushWg.Wait()
 
 	batch := make([]msg, 0, k.settings.workers*2)
 
-	flush := func(finalFlush bool) {
+	// asyncFlush sends batch to store asynchronously (non-blocking)
+	asyncFlush := func() {
 		if len(batch) == 0 {
 			return
 		}
@@ -385,60 +344,67 @@ func (k *Kharon) runPusher(ctx context.Context, wg *sync.WaitGroup) {
 		}
 		batch = batch[:0]
 
-		// Capture for goroutine
-		dels, updates := delIds, upds
-
-		if finalFlush {
-			// Final flush: synchronous with fresh context
-			flushCtx, cancel := context.WithTimeout(context.Background(), k.settings.shutdownTimeout)
-			defer cancel()
-			k.logger.DebugContext(flushCtx, "flushing final batch on shutdown",
-				"deletes", len(dels), "updates", len(updates))
-			if len(dels) > 0 {
-				if err := k.store.DeleteBatch(flushCtx, dels); err != nil {
-					k.logger.ErrorContext(flushCtx, "error deleting batch", "error", err)
-				}
-			}
-			if len(updates) > 0 {
-				if err := k.store.UpdateBatch(flushCtx, updates); err != nil {
-					k.logger.ErrorContext(flushCtx, "error updating batch", "error", err)
-				}
-			}
-			return
-		}
-
-		// Normal flush: async to not block pusher (preserves original performance)
-		batchWg.Add(1)
+		flushWg.Add(1)
 		go func() {
-			defer batchWg.Done()
-			if len(dels) > 0 {
-				if err := k.store.DeleteBatch(ctx, dels); err != nil {
+			defer flushWg.Done()
+			if len(delIds) > 0 {
+				if err := k.store.DeleteBatch(ctx, delIds); err != nil {
 					k.logger.ErrorContext(ctx, "error deleting batch", "error", err)
 				}
 			}
-			if len(updates) > 0 {
-				if err := k.store.UpdateBatch(ctx, updates); err != nil {
+			if len(upds) > 0 {
+				if err := k.store.UpdateBatch(ctx, upds); err != nil {
 					k.logger.ErrorContext(ctx, "error updating batch", "error", err)
 				}
 			}
 		}()
 	}
 
+	// syncFlush sends batch to store synchronously (for shutdown)
+	syncFlush := func(flushCtx context.Context) {
+		if len(batch) == 0 {
+			return
+		}
+
+		delIds := make([]TicketId, 0, len(batch))
+		upds := make([]UpdateSet, 0, len(batch))
+
+		for _, m := range batch {
+			if m.upd == nil {
+				delIds = append(delIds, m.tid)
+			} else {
+				upds = append(upds, *m.upd)
+			}
+		}
+		batch = batch[:0]
+
+		if len(delIds) > 0 {
+			if err := k.store.DeleteBatch(flushCtx, delIds); err != nil {
+				k.logger.ErrorContext(flushCtx, "error deleting batch", "error", err)
+			}
+		}
+		if len(upds) > 0 {
+			if err := k.store.UpdateBatch(flushCtx, upds); err != nil {
+				k.logger.ErrorContext(flushCtx, "error updating batch", "error", err)
+			}
+		}
+	}
+
 	for {
 		select {
-		case m, ok := <-k.outcome:
-			if !ok {
-				// Channel closed - final flush and exit
-				flush(true)
-				return
-			}
+		case <-ctx.Done():
+			// Final sync flush with fresh context
+			flushCtx, cancel := context.WithTimeout(context.Background(), k.settings.shutdownFlushTimeout)
+			syncFlush(flushCtx)
+			cancel()
+			return
+		case m := <-k.outcome:
 			batch = append(batch, m)
-			// Flush if batch is getting large
 			if len(batch) >= cap(batch) {
-				flush(false)
+				asyncFlush()
 			}
 		case <-ticker.C:
-			flush(false)
+			asyncFlush()
 		}
 	}
 }
@@ -503,7 +469,6 @@ func (k *Kharon) poll(ctx context.Context) time.Duration {
 		k.stats.polled.value.Add(int64(len(result.Tickets)))
 
 		for _, t := range result.Tickets {
-			t := t // capture for closure
 			select {
 			case k.income <- &t:
 				k.stats.scheduled.value.Add(1)

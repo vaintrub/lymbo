@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/ochaton/lymbo/status"
@@ -124,25 +125,14 @@ func (k *Kharon) save(ctx context.Context, tid TicketId, o *Opts) error {
 		},
 	}
 	return nil
-	// return k.store.UpdateSet(ctx, UpdateSet{
-	// 	Id:          tid,
-	// 	Status:      o.status,
-	// 	Nice:        o.nice,
-	// 	Runat:       &runat,
-	// 	Payload:     o.payload,
-	// 	ErrorReason: o.errorReason,
-	// })
 }
 
 func (k *Kharon) delete(_ context.Context, tid TicketId) error {
-	// we should batch deletes, but for now...
-	// what if do nothing?
 	k.outcome <- msg{
 		tid: tid,
 		upd: nil,
 	}
 	return nil
-	// return k.store.Delete(ctx, tid)
 }
 
 func toOpts(o *Opts, opts ...Option) *Opts {
@@ -163,7 +153,7 @@ func (k *Kharon) Ack(ctx context.Context, tid TicketId, opts ...Option) error {
 	if err != nil {
 		return err
 	}
-	k.stats.acked.value++
+	k.stats.acked.value.Add(1)
 	return nil
 }
 
@@ -174,7 +164,7 @@ func (k *Kharon) Done(ctx context.Context, tid TicketId, opts ...Option) error {
 	if err := k.save(ctx, tid, o); err != nil {
 		return err
 	}
-	k.stats.done.value++
+	k.stats.done.value.Add(1)
 	return nil
 }
 
@@ -190,7 +180,7 @@ func (k *Kharon) Cancel(ctx context.Context, tid TicketId, opts ...Option) error
 	if err != nil {
 		return err
 	}
-	k.stats.canceled.value++
+	k.stats.canceled.value.Add(1)
 	return nil
 }
 
@@ -200,7 +190,7 @@ func (k *Kharon) Fail(ctx context.Context, tid TicketId, opts ...Option) error {
 	if err := k.save(ctx, tid, o); err != nil {
 		return err
 	}
-	k.stats.failed.value++
+	k.stats.failed.value.Add(1)
 	return nil
 }
 
@@ -211,7 +201,7 @@ func (k *Kharon) Retry(ctx context.Context, tid TicketId, opts ...Option) error 
 	if err := k.save(ctx, tid, o); err != nil {
 		return err
 	}
-	k.stats.retried.value++
+	k.stats.retried.value.Add(1)
 	return nil
 }
 
@@ -224,7 +214,7 @@ func (k *Kharon) Put(ctx context.Context, t Ticket, opts ...Option) error {
 	if err := k.store.Put(ctx, t); err != nil {
 		return err
 	}
-	k.stats.added.value++
+	k.stats.added.value.Add(1)
 	return nil
 }
 
@@ -233,7 +223,7 @@ func (k *Kharon) Delete(ctx context.Context, tid TicketId) error {
 	if err := k.store.Delete(ctx, tid); err != nil {
 		return err
 	}
-	k.stats.deleted.value++
+	k.stats.deleted.value.Add(1)
 	return nil
 }
 
@@ -244,104 +234,47 @@ func (k *Kharon) Get(ctx context.Context, tid TicketId) (Ticket, error) {
 
 func (k *Kharon) Stats() Stats {
 	return Stats{
-		Added:     k.stats.added.value,
-		Polled:    k.stats.polled.value,
-		Scheduled: k.stats.scheduled.value,
-		Acked:     k.stats.acked.value,
-		Failed:    k.stats.failed.value,
-		Done:      k.stats.done.value,
-		Retried:   k.stats.retried.value,
-		Canceled:  k.stats.canceled.value,
-		Deleted:   k.stats.deleted.value,
-		Expired:   k.stats.expired.value,
-		Processed: k.stats.processed.value,
+		Added:          k.stats.added.value.Load(),
+		Polled:         k.stats.polled.value.Load(),
+		Scheduled:      k.stats.scheduled.value.Load(),
+		Acked:          k.stats.acked.value.Load(),
+		Failed:         k.stats.failed.value.Load(),
+		Done:           k.stats.done.value.Load(),
+		Retried:        k.stats.retried.value.Load(),
+		Canceled:       k.stats.canceled.value.Load(),
+		Deleted:        k.stats.deleted.value.Load(),
+		Expired:        k.stats.expired.value.Load(),
+		Processed:      k.stats.processed.value.Load(),
+		RunningWorkers: k.stats.runningWorkers.value.Load(),
 	}
 }
 
 // Run starts the Kharon job processing system with the given context and router.
 // It spawns worker goroutines and begins polling for tickets to process.
 // Returns when ctx is cancelled or an error occurs.
+//
+// On shutdown, all goroutines exit immediately. In-flight tickets are not
+// drained since they are persisted and will be reprocessed on next startup.
 func (k *Kharon) Run(ctx context.Context, r *Router) error {
-	wctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	defer close(k.outcome)
-	defer close(k.income)
+	var wg sync.WaitGroup
 
-	work := func(ctx context.Context) {
-		defer k.logger.DebugContext(ctx, "worker exiting")
+	// Start pusher
+	wg.Add(1)
+	go k.runPusher(ctx, &wg)
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case t, ok := <-k.income:
-				if !ok {
-					return
-				}
-				if t == nil {
-					k.logger.WarnContext(ctx, "received nil ticket")
-					continue
-				}
-				k.processTicket(ctx, r, t)
-				k.stats.processed.value++
-			}
-		}
+	// Start workers
+	for i := 0; i < k.settings.workers; i++ {
+		wg.Add(1)
+		go k.runWorker(ctx, r, &wg)
 	}
 
-	push := func(ctx context.Context) {
-		defer k.logger.DebugContext(ctx, "push exiting")
-		t := time.NewTicker(100 * time.Millisecond)
-		defer t.Stop()
-
-		batch := []msg{}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case m, ok := <-k.outcome:
-				if !ok {
-					return
-				}
-				// There are basically 2 batches:
-				// 1. those to delete
-				// 2. those to save (update)
-				batch = append(batch, m)
-			case <-t.C:
-				delIds := []TicketId{}
-				for _, m := range batch {
-					if m.upd == nil {
-						delIds = append(delIds, m.tid)
-					}
-				}
-				upds := []UpdateSet{}
-				for _, m := range batch {
-					if m.upd == nil {
-						continue
-					}
-					upds = append(upds, *m.upd)
-				}
-				batch = batch[:0]
-				go func() {
-					if err := k.store.DeleteBatch(ctx, delIds); err != nil {
-						k.logger.ErrorContext(ctx, "error deleting batch", "error", err)
-					}
-					if err := k.store.UpdateBatch(ctx, upds); err != nil {
-						k.logger.ErrorContext(ctx, "error updating batch", "error", err)
-					}
-				}()
-			}
-		}
-	}
-
-	go push(wctx)
-
-	for range k.settings.workers {
-		go work(wctx)
-	}
-
+	// Start expiration worker
 	if k.settings.enableExpiration {
-		go k.runExpirationWorker(wctx)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			k.runExpirationWorker(ctx)
+		}()
 	}
 
 	k.logger.InfoContext(ctx, "kharon started",
@@ -352,55 +285,209 @@ func (k *Kharon) Run(ctx context.Context, r *Router) error {
 		"process_time", k.settings.processTime.String(),
 	)
 
+	// Run main polling loop (blocks until ctx cancelled)
+	pollErr := k.runPoller(ctx)
+
+	// Wait for all goroutines to exit
+	wg.Wait()
+
+	k.logger.InfoContext(ctx, "shutdown complete")
+	return pollErr
+}
+
+// runWorker processes tickets from income channel.
+// Exits when ctx is cancelled.
+func (k *Kharon) runWorker(ctx context.Context, r *Router, wg *sync.WaitGroup) {
+	k.stats.runningWorkers.value.Add(1)
+	defer wg.Done()
+	defer k.stats.runningWorkers.value.Add(-1)
+	defer k.logger.DebugContext(ctx, "worker exiting")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-k.income:
+			k.processTicket(ctx, r, t)
+			k.stats.processed.value.Add(1)
+		}
+	}
+}
+
+// runPusher batches and persists updates from outcome channel.
+// Exits when ctx is cancelled, flushing any remaining batch.
+func (k *Kharon) runPusher(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+	defer k.logger.DebugContext(ctx, "pusher exiting")
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Track in-flight async flush goroutines
+	var flushWg sync.WaitGroup
+	defer flushWg.Wait()
+
+	batch := make([]msg, 0, k.settings.workers*2)
+
+	// asyncFlush sends batch to store asynchronously (non-blocking)
+	asyncFlush := func() {
+		if len(batch) == 0 {
+			return
+		}
+
+		delIds := make([]TicketId, 0, len(batch))
+		upds := make([]UpdateSet, 0, len(batch))
+
+		for _, m := range batch {
+			if m.upd == nil {
+				delIds = append(delIds, m.tid)
+			} else {
+				upds = append(upds, *m.upd)
+			}
+		}
+		batch = batch[:0]
+
+		flushWg.Add(1)
+		go func() {
+			defer flushWg.Done()
+			// Use independent context to ensure flush completes even if parent ctx is cancelled
+			flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), k.settings.shutdownFlushTimeout)
+			defer cancel()
+
+			if len(delIds) > 0 {
+				if err := k.store.DeleteBatch(flushCtx, delIds); err != nil {
+					k.logger.ErrorContext(flushCtx, "error deleting batch", "error", err)
+				}
+			}
+			if len(upds) > 0 {
+				if err := k.store.UpdateBatch(flushCtx, upds); err != nil {
+					k.logger.ErrorContext(flushCtx, "error updating batch", "error", err)
+				}
+			}
+		}()
+	}
+
+	// syncFlush sends batch to store synchronously (for shutdown)
+	syncFlush := func(flushCtx context.Context) {
+		if len(batch) == 0 {
+			return
+		}
+
+		delIds := make([]TicketId, 0, len(batch))
+		upds := make([]UpdateSet, 0, len(batch))
+
+		for _, m := range batch {
+			if m.upd == nil {
+				delIds = append(delIds, m.tid)
+			} else {
+				upds = append(upds, *m.upd)
+			}
+		}
+		batch = batch[:0]
+
+		if len(delIds) > 0 {
+			if err := k.store.DeleteBatch(flushCtx, delIds); err != nil {
+				k.logger.ErrorContext(flushCtx, "error deleting batch", "error", err)
+			}
+		}
+		if len(upds) > 0 {
+			if err := k.store.UpdateBatch(flushCtx, upds); err != nil {
+				k.logger.ErrorContext(flushCtx, "error updating batch", "error", err)
+			}
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Final sync flush with fresh context
+			flushCtx, cancel := context.WithTimeout(context.Background(), k.settings.shutdownFlushTimeout)
+			syncFlush(flushCtx)
+			cancel()
+			return
+		case m := <-k.outcome:
+			batch = append(batch, m)
+			if len(batch) >= cap(batch) {
+				asyncFlush()
+			}
+		case <-ticker.C:
+			asyncFlush()
+		}
+	}
+}
+
+// runPoller polls the store for pending tickets and sends them to workers.
+// Returns when ctx is cancelled.
+func (k *Kharon) runPoller(ctx context.Context) error {
+	defer k.logger.DebugContext(ctx, "poller exiting")
+
 	sleepDuration := k.settings.maxReactionDelay
+	timer := time.NewTimer(sleepDuration)
+	defer timer.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(sleepDuration):
-			for {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				default:
-				}
+		case <-timer.C:
+			sleepDuration = k.poll(ctx)
+			if sleepDuration == 0 {
+				return ctx.Err()
+			}
+			timer.Reset(sleepDuration)
+		}
+	}
+}
 
-				result, err := k.store.PollPending(ctx, PollRequest{
-					Limit:           k.settings.batchSize,
-					Now:             time.Now(),
-					TTR:             k.settings.processTime,
-					BackoffBase:     k.settings.backoffBase,
-					MaxBackoffDelay: k.settings.maxBackoffDelay,
-				})
-				if err != nil {
-					k.logger.ErrorContext(ctx, "error polling store", "error", err)
-					sleepDuration = k.settings.maxReactionDelay
-					break
-				}
+// poll executes one polling cycle and returns the next sleep duration.
+// Returns 0 if ctx is cancelled.
+func (k *Kharon) poll(ctx context.Context) time.Duration {
+	for {
+		select {
+		case <-ctx.Done():
+			return 0
+		default:
+		}
 
-				if result.SleepUntil != nil {
-					sleepDuration = time.Until(*result.SleepUntil)
-					sleepDuration = min(sleepDuration, k.settings.maxReactionDelay)
-					sleepDuration = max(sleepDuration, k.settings.minReactionDelay)
-					break
-				}
-				if len(result.Tickets) == 0 {
-					sleepDuration = k.settings.maxReactionDelay
-					break
-				}
+		result, err := k.store.PollPending(ctx, PollRequest{
+			Limit:           k.settings.batchSize,
+			Now:             time.Now(),
+			TTR:             k.settings.processTime,
+			BackoffBase:     k.settings.backoffBase,
+			MaxBackoffDelay: k.settings.maxBackoffDelay,
+		})
 
-				k.stats.polled.value += int64(len(result.Tickets))
+		if err != nil {
+			k.logger.ErrorContext(ctx, "error polling store", "error", err)
+			return k.settings.maxReactionDelay
+		}
 
-				for _, t := range result.Tickets {
-					k.income <- &t
-					k.stats.scheduled.value++
-				}
+		if result.SleepUntil != nil {
+			d := time.Until(*result.SleepUntil)
+			d = min(d, k.settings.maxReactionDelay)
+			d = max(d, k.settings.minReactionDelay)
+			return d
+		}
+
+		if len(result.Tickets) == 0 {
+			return k.settings.maxReactionDelay
+		}
+
+		k.stats.polled.value.Add(int64(len(result.Tickets)))
+
+		for _, t := range result.Tickets {
+			select {
+			case k.income <- &t:
+				k.stats.scheduled.value.Add(1)
+			case <-ctx.Done():
+				return 0
 			}
 		}
 	}
 }
 
 // runExpirationWorker runs a background worker that periodically expires old tickets.
+// This worker is independent from the main pipeline and uses ctx.Done() for shutdown.
 func (k *Kharon) runExpirationWorker(ctx context.Context) {
 	k.logger.InfoContext(ctx, "ticket expiration worker started")
 	ticker := time.NewTicker(k.settings.expirationInterval)
@@ -414,11 +501,9 @@ func (k *Kharon) runExpirationWorker(ctx context.Context) {
 		case <-ticker.C:
 			if n, err := k.store.ExpireTickets(ctx, ExpirationBatchSize, time.Now()); err != nil {
 				k.logger.ErrorContext(ctx, "error expiring tickets", "error", err)
-			} else {
-				if n > 0 {
-					k.stats.expired.value += n
-					k.logger.DebugContext(ctx, "ticket expiration run completed", "expired_count", n)
-				}
+			} else if n > 0 {
+				k.stats.expired.value.Add(n)
+				k.logger.DebugContext(ctx, "ticket expiration run completed", "expired_count", n)
 			}
 		}
 	}

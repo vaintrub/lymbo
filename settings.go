@@ -35,7 +35,10 @@ type Settings struct {
 	enableExpiration bool
 
 	// expirationInterval
-	expirationInterval time.Duration ``
+	expirationInterval time.Duration
+
+	// shutdownFlushTimeout is the timeout for flushing remaining batch on shutdown.
+	shutdownFlushTimeout time.Duration
 }
 
 // DefaultSettings returns a Settings instance with sensible defaults.
@@ -50,6 +53,7 @@ func DefaultSettings() *Settings {
 		workers:            4,
 		enableExpiration:   true,
 		expirationInterval: ExpirationInterval,
+		shutdownFlushTimeout:  5 * time.Second,
 	}
 }
 
@@ -97,6 +101,12 @@ func (s *Settings) WithMaxReactionDelay(d time.Duration) *Settings {
 
 func (s *Settings) WithMinReactionDelay(d time.Duration) *Settings {
 	s.minReactionDelay = d
+	return s
+}
+
+// WithShutdownFlushTimeout sets the timeout for flushing remaining batch on shutdown.
+func (s *Settings) WithShutdownFlushTimeout(d time.Duration) *Settings {
+	s.shutdownFlushTimeout = d
 	return s
 }
 

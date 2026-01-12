@@ -350,14 +350,18 @@ func (k *Kharon) runPusher(ctx context.Context, wg *sync.WaitGroup) {
 		flushWg.Add(1)
 		go func() {
 			defer flushWg.Done()
+			// Use independent context to ensure flush completes even if parent ctx is cancelled
+			flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), k.settings.shutdownFlushTimeout)
+			defer cancel()
+
 			if len(delIds) > 0 {
-				if err := k.store.DeleteBatch(ctx, delIds); err != nil {
-					k.logger.ErrorContext(ctx, "error deleting batch", "error", err)
+				if err := k.store.DeleteBatch(flushCtx, delIds); err != nil {
+					k.logger.ErrorContext(flushCtx, "error deleting batch", "error", err)
 				}
 			}
 			if len(upds) > 0 {
-				if err := k.store.UpdateBatch(ctx, upds); err != nil {
-					k.logger.ErrorContext(ctx, "error updating batch", "error", err)
+				if err := k.store.UpdateBatch(flushCtx, upds); err != nil {
+					k.logger.ErrorContext(flushCtx, "error updating batch", "error", err)
 				}
 			}
 		}()

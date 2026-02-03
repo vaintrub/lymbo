@@ -394,14 +394,29 @@ func (r *Tickets) UpdateSet(ctx context.Context, us lymbo.UpdateSet) error {
 		return err
 	}
 
-	_, err = r.db.Exec(ctx, r.queries.update,
-		usp.id,
-		usp.status,
-		usp.nice,
-		usp.runat,
-		usp.payload,
-		usp.error_reason,
-	)
+	switch {
+	case us.Backoff != nil:
+		_, err = r.db.Exec(ctx, r.queries.backoff,
+			usp.id,
+			usp.status,
+			usp.nice,
+			us.Backoff.Jitter.Milliseconds(),
+			us.Backoff.Base,
+			int32(us.Backoff.MaxDelay.Seconds()),
+			usp.payload,
+			usp.error_reason,
+		)
+	default:
+		_, err = r.db.Exec(ctx, r.queries.update,
+			usp.id,
+			usp.status,
+			usp.nice,
+			usp.runat,
+			usp.payload,
+			usp.error_reason,
+		)
+	}
+
 	return err
 }
 

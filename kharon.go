@@ -3,6 +3,7 @@ package lymbo
 import (
 	"context"
 	"log/slog"
+	"math"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -31,10 +32,10 @@ const (
 
 	// DefaultBackoffBase is the default base for exponential backoff calculation.
 	DefaultBackoffBase = 1.5
-
-	// InfinityDelay is a duration representing an effectively infinite delay.
-	InfinityDelay time.Duration = 100 * 365 * 24 * time.Hour
 )
+
+// InfinityDelay is a duration representing an effectively infinite delay.
+var InfinityDelay = FixedDelay(100 * 365 * 24 * time.Hour)
 
 type msg struct {
 	tid TicketId
@@ -87,7 +88,17 @@ func NewKharon(store Store, s *Settings, logger *slog.Logger) *Kharon {
 
 func beforeUpdate(ctx context.Context, t *Ticket, o *Opts) error {
 	t.Status = *o.status
-	t.Runat = time.Now().Add(o.delay)
+	switch o.delay.how {
+	case delayFixed:
+		t.Runat = time.Now().Add(o.delay.fixed.duration)
+	case delayExponential:
+		// exponential backoff support
+		delay := time.Duration(math.Pow(o.delay.exponential.base, float64(t.Attempts)))
+		delay = min(delay, o.delay.exponential.maxDelay)
+		t.Runat = time.Now().Add(delay)
+	default:
+		// no delay
+	}
 	if o.errorReason != nil {
 		t.ErrorReason = o.errorReason
 	}
@@ -112,17 +123,33 @@ func (k *Kharon) save(ctx context.Context, tid TicketId, o *Opts) error {
 		})
 	}
 
-	runat := time.Now().Add(o.delay)
+	us := &UpdateSet{
+		Id:          tid,
+		Status:      o.status,
+		Nice:        o.nice,
+		Payload:     o.payload,
+		ErrorReason: o.errorReason,
+	}
+
+	switch o.delay.how {
+	case delayFixed:
+		// no-op
+		us.Runat = new(time.Time)
+		*us.Runat = time.Now().Add(o.delay.fixed.duration)
+	case delayExponential:
+		// exponential backoff support
+		us.Backoff = &DelayBackoff{
+			Base:     o.delay.exponential.base,
+			MaxDelay: o.delay.exponential.maxDelay,
+			Jitter:   o.delay.exponential.jitter,
+		}
+	default:
+		// no delay
+	}
+
 	k.outcome <- msg{
 		tid: tid,
-		upd: &UpdateSet{
-			Id:          tid,
-			Status:      o.status,
-			Nice:        o.nice,
-			Runat:       &runat,
-			Payload:     o.payload,
-			ErrorReason: o.errorReason,
-		},
+		upd: us,
 	}
 	return nil
 }

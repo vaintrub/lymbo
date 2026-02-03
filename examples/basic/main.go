@@ -56,7 +56,13 @@ func main() {
 			slog.ErrorContext(ctx, "failed to connect to pgpool", "error", err)
 			os.Exit(1)
 		}
-		store := postgres.NewTicketsRepository(pool)
+		store, err := postgres.NewTicketsRepositoryWithConfig(postgres.Config{
+			Pool:      pool,
+			TableName: "tickets",
+		})
+		if err != nil {
+			panic(err)
+		}
 		if err := store.Migrate(ctx); err != nil {
 			slog.ErrorContext(ctx, "failed to migrate database", "error", err)
 			os.Exit(1)
@@ -69,8 +75,14 @@ func main() {
 	r.HandleFunc("ack", func(ctx context.Context, t *lymbo.Ticket) error {
 		return kh.Ack(ctx, t.ID)
 	})
+	r.HandleFunc("backoff", func(ctx context.Context, t *lymbo.Ticket) error {
+		if t.Attempts >= 5 {
+			return kh.Ack(ctx, t.ID)
+		}
+		return kh.Retry(ctx, t.ID, lymbo.WithDelay(lymbo.BackoffDelay(1.5, 15*time.Second, 0)))
+	})
 	r.HandleFunc("fail", func(ctx context.Context, t *lymbo.Ticket) error {
-		return kh.Fail(ctx, t.ID, lymbo.WithErrorReason("failed by handler"), lymbo.WithDelay(10*time.Second))
+		return kh.Fail(ctx, t.ID, lymbo.WithErrorReason("failed by handler"), lymbo.WithDelay(lymbo.FixedDelay(10*time.Second)))
 	})
 	r.HandleFunc("done", func(ctx context.Context, t *lymbo.Ticket) error {
 		return kh.Done(ctx, t.ID)
@@ -79,8 +91,8 @@ func main() {
 		return kh.Cancel(ctx, t.ID)
 	})
 	r.NotFoundFunc(func(ctx context.Context, t *lymbo.Ticket) error {
-		slog.DebugContext(ctx, "unknown ticket type", "ticket_id", t.ID, "ticket_type", t.Type)
-		return kh.Fail(ctx, t.ID, lymbo.WithErrorReason("unsupported ticket type"), lymbo.WithDelay(30*time.Second))
+		slog.InfoContext(ctx, "unknown ticket type", "ticket_id", t.ID, "ticket_type", t.Type)
+		return kh.Fail(ctx, t.ID, lymbo.WithErrorReason("unsupported ticket type"), lymbo.WithDelay(lymbo.FixedDelay(30*time.Second)))
 	})
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -336,7 +348,7 @@ func (h *AddTicketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid parameters", http.StatusBadRequest)
 				return
 			}
-			opts = append(opts, lymbo.WithDelay(time.Duration(dx*float64(time.Second))))
+			opts = append(opts, lymbo.WithDelay(lymbo.FixedDelay(time.Duration(dx*float64(time.Second)))))
 		}
 	}
 

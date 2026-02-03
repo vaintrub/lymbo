@@ -10,7 +10,7 @@ Kharon is a task orchestration library that allows you to schedule, process, and
 
 - **Flexible Storage**: In-memory and PostgreSQL backends with pluggable Store interface
 - **Priority Scheduling**: Nice values for task prioritization (lower = higher priority)
-- **Retry Logic**: Exponential backoff with configurable base and max delay
+- **Flexible Retry Strategies**: Fixed delays or exponential backoff with configurable base, max delay, and jitter
 - **Automatic Expiration**: Built-in cleanup of completed/expired tickets
 - **Flexible Options**: Fine-grained control over ticket lifecycle with options
 - **Concurrent Processing**: Configurable worker pools for parallel execution
@@ -96,9 +96,8 @@ err = kh.Put(ctx, *ticket)
 
 // Add ticket with options (applied during Put)
 err = kh.Put(ctx, *ticket,
-    lymbo.WithDelay(5*time.Minute),  // Delay first execution
-    lymbo.WithNice(10),               // Set priority
-    ),
+    lymbo.WithDelay(lymbo.FixedDelay(5*time.Minute)),  // Delay first execution
+    lymbo.WithNice(10),                                 // Set priority
 )
 ```
 
@@ -140,7 +139,7 @@ err := kh.Ack(ctx, ticketID, lymbo.WithKeep())
 // Keep ticket with TTL (will be auto-removed after delay)
 err := kh.Ack(ctx, ticketID,
     lymbo.WithKeep(),
-    lymbo.WithDelay(24*time.Hour), // Remove after 24 hours
+    lymbo.WithDelay(lymbo.FixedDelay(24*time.Hour)), // Remove after 24 hours
 )
 ```
 
@@ -154,12 +153,12 @@ err := kh.Done(ctx, ticketID)
 
 // Mark as done with TTL for auto-removal
 err := kh.Done(ctx, ticketID,
-    lymbo.WithDelay(1*time.Hour), // Auto-remove after 1 hour
+    lymbo.WithDelay(lymbo.FixedDelay(1*time.Hour)), // Auto-remove after 1 hour
 )
 
 // Update ticket payload before marking done
 err := kh.Done(ctx, ticketID,
-    lymbo.WithDelay(24*time.Hour),
+    lymbo.WithDelay(lymbo.FixedDelay(24*time.Hour)),
     lymbo.WithUpdate(func(ctx context.Context, t *lymbo.Ticket) error {
         // Store struct directly - no need to pre-marshal
         t.Payload = map[string]any{"result": "success", "completedAt": time.Now()}
@@ -181,7 +180,7 @@ err := kh.Fail(ctx, ticketID,
 // Fail with TTL for auto-cleanup
 err := kh.Fail(ctx, ticketID,
     lymbo.WithErrorReason("database error"),
-    lymbo.WithDelay(7*24*time.Hour), // Keep for 7 days
+    lymbo.WithDelay(lymbo.FixedDelay(7*24*time.Hour)), // Keep for 7 days
 )
 
 // Fail and update ticket data
@@ -218,7 +217,7 @@ err := kh.Cancel(ctx, ticketID,
 // Cancel with TTL
 err := kh.Cancel(ctx, ticketID,
     lymbo.WithKeep(),
-    lymbo.WithDelay(30*24*time.Hour), // Keep for 30 days
+    lymbo.WithDelay(lymbo.FixedDelay(30*24*time.Hour)), // Keep for 30 days
 )
 ```
 
@@ -230,20 +229,25 @@ Reschedules a ticket for future processing with updated parameters.
 // Retry immediately with default backoff
 err := kh.Retry(ctx, ticketID)
 
-// Retry with custom delay
+// Retry with fixed delay
 err := kh.Retry(ctx, ticketID,
-    lymbo.WithDelay(5*time.Minute), // Retry in 5 minutes
+    lymbo.WithDelay(lymbo.FixedDelay(5*time.Minute)), // Retry in 5 minutes
+)
+
+// Retry with exponential backoff
+err := kh.Retry(ctx, ticketID,
+    lymbo.WithDelay(lymbo.BackoffDelay(1.5, 15*time.Second, 0)), // base=1.5, max=15s, no jitter
 )
 
 // Retry with priority change
 err := kh.Retry(ctx, ticketID,
-    lymbo.WithDelay(1*time.Minute),
+    lymbo.WithDelay(lymbo.FixedDelay(1*time.Minute)),
     lymbo.WithNice(1), // Higher priority for retry
 )
 
 // Retry with payload update
 err := kh.Retry(ctx, ticketID,
-    lymbo.WithDelay(10*time.Second),
+    lymbo.WithDelay(lymbo.FixedDelay(10*time.Second)),
     lymbo.WithUpdate(func(ctx context.Context, t *lymbo.Ticket) error {
         // Add retry metadata to payload
         payload := t.Payload.(map[string]any)
@@ -270,11 +274,28 @@ All state management methods (`Retry`, `Done`, `Cancel`, `Fail`, `Put`, `Ack`) s
 
 | Option | Description | Applicable Methods |
 |--------|-------------|-------------------|
-| `WithDelay(d time.Duration)` | Delay next processing or set TTL for auto-removal | All |
+| `WithDelay(DelayStrategy)` | Delay next processing or set TTL for auto-removal. Use `FixedDelay(d)` for fixed delays or `BackoffDelay(base, maxDelay, jitter)` for exponential backoff | All |
 | `WithNice(n int)` | Change ticket priority (lower = higher priority) | All |
 | `WithUpdate(fn func(context.Context, *Ticket) error)` | Custom ticket modification (executed after other options) | All |
 | `WithKeep()` | Keep ticket in store instead of removing | `Ack`, `Cancel` |
 | `WithErrorReason(reason any)` | Store error/cancellation reason | `Fail`, `Cancel`, `Retry` |
+
+### Delay Strategies
+
+`WithDelay()` accepts a `DelayStrategy` which can be created using one of these functions:
+
+```go
+// FixedDelay - use a constant delay duration
+lymbo.FixedDelay(5 * time.Minute)
+
+// BackoffDelay - exponential backoff based on ticket attempts
+// Parameters: base (float64), maxDelay (time.Duration), jitter (time.Duration)
+lymbo.BackoffDelay(1.5, 15*time.Second, 0)           // delay = 1.5^attempts seconds, max 15s, no jitter
+lymbo.BackoffDelay(2.0, 1*time.Minute, 500*time.Millisecond) // with jitter
+```
+
+- **FixedDelay**: Always delays by the exact duration specified
+- **BackoffDelay**: Calculates delay as `base^attempts` seconds, capped at `maxDelay`, with optional random jitter
 
 **Important Notes:**
 
@@ -444,12 +465,12 @@ r.HandleFunc("task", func(ctx context.Context, t lymbo.Ticket) error {
     if err := doWork(t.Payload); err != nil {
         if isTransientError(err) {
             // Retry transient errors with backoff
-            return kh.Retry(ctx, t.ID, lymbo.WithDelay(5*time.Minute))
+            return kh.Retry(ctx, t.ID, lymbo.WithDelay(lymbo.FixedDelay(5*time.Minute)))
         }
         // Permanent failure - keep for debugging
         return kh.Fail(ctx, t.ID,
             lymbo.WithErrorReason(err.Error()),
-            lymbo.WithDelay(7*24*time.Hour),
+            lymbo.WithDelay(lymbo.FixedDelay(7*24*time.Hour)),
         )
     }
     // Success - acknowledge and remove
@@ -519,11 +540,11 @@ r.HandleFunc("sync-user", func(ctx context.Context, t lymbo.Ticket) error {
         // Keep failed ticket for debugging, auto-remove after 7 days
         return kh.Fail(ctx, t.ID,
             lymbo.WithErrorReason(err.Error()),
-            lymbo.WithDelay(7*24*time.Hour),
+            lymbo.WithDelay(lymbo.FixedDelay(7*24*time.Hour)),
         )
     }
     // Keep successful sync record for 24 hours
-    return kh.Done(ctx, t.ID, lymbo.WithDelay(24*time.Hour))
+    return kh.Done(ctx, t.ID, lymbo.WithDelay(lymbo.FixedDelay(24*time.Hour)))
 })
 ```
 
@@ -533,9 +554,9 @@ r.HandleFunc("sync-user", func(ctx context.Context, t lymbo.Ticket) error {
 r.HandleFunc("api-call", func(ctx context.Context, t lymbo.Ticket) error {
     if err := callRateLimitedAPI(t.Payload); err != nil {
         if isRateLimitError(err) {
-            // Retry with custom delay and lower priority
+            // Retry with fixed delay and lower priority
             return kh.Retry(ctx, t.ID,
-                lymbo.WithDelay(5*time.Minute),
+                lymbo.WithDelay(lymbo.FixedDelay(5*time.Minute)),
                 lymbo.WithNice(100), // Lower priority
             )
         }
@@ -560,7 +581,7 @@ r.HandleFunc("multi-step", func(ctx context.Context, t lymbo.Ticket) error {
     if payload.Step < 3 {
         // Move to next step
         return kh.Retry(ctx, t.ID,
-            lymbo.WithDelay(1*time.Second),
+            lymbo.WithDelay(lymbo.FixedDelay(1*time.Second)),
             lymbo.WithUpdate(func(ctx context.Context, ticket *lymbo.Ticket) error {
                 // Increment step in payload
                 payload.Step++

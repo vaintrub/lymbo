@@ -17,11 +17,18 @@ type PollRequest struct {
 	MaxBackoffDelay time.Duration
 }
 
+type DelayBackoff struct {
+	Base     float64
+	Jitter   time.Duration
+	MaxDelay time.Duration
+}
+
 type UpdateSet struct {
 	Id          TicketId
 	Status      *status.Status
 	Nice        *int
 	Runat       *time.Time
+	Backoff     *DelayBackoff
 	Payload     any
 	ErrorReason any
 }

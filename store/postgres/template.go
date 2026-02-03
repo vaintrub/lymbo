@@ -86,6 +86,16 @@ SET
 	error_reason = COALESCE($6, error_reason)
 WHERE id = $1`))
 
+// runat = now() + {jitter} + min(pow({base}, attempt), {max})
+var backoff = template.Must(template.New("backoff").Parse(`UPDATE {{.TableName}}
+SET
+	status = COALESCE($2, status),
+	nice = COALESCE($3, nice),
+	runat = now() + (GREATEST($4,0) + LEAST(POWER($5, attempts), $6)) * INTERVAL '1 second',
+	payload = COALESCE($7, payload),
+	error_reason = COALESCE($8, error_reason)
+WHERE id = $1`))
+
 var poll = template.Must(template.New("poll").Parse(`WITH rescheduled_tickets AS (
 	UPDATE {{.TableName}} as t
 	SET
@@ -146,6 +156,7 @@ type Queries struct {
 	put     string
 	delete  string
 	update  string
+	backoff string
 	poll    string
 	expire  string
 }
@@ -186,6 +197,8 @@ func newQueries(tableName string) (*Queries, error) {
 	if qt.expire, err = exec(expire); err != nil {
 		return nil, fmt.Errorf("failed to execute template `expire`: %w", err)
 	}
-
+	if qt.backoff, err = exec(backoff); err != nil {
+		return nil, fmt.Errorf("failed to execute template `backoff`: %w", err)
+	}
 	return qt, nil
 }

@@ -126,6 +126,15 @@ func (m *Store) UpdateSet(ctx context.Context, us lymbo.UpdateSet) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// exponential backoff support
+	if us.Backoff != nil {
+		delay := time.Duration(math.Pow(us.Backoff.Base, float64(m.data[us.Id].Attempts)))
+		delay = min(delay, us.Backoff.MaxDelay)
+		delay += us.Backoff.Jitter
+		newRunat := time.Now().Add(delay)
+		us.Runat = &newRunat
+	}
+
 	t, exists := m.data[us.Id]
 	if !exists {
 		return lymbo.ErrTicketNotFound

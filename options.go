@@ -10,10 +10,28 @@ import (
 // Option is a functional option for configuring ticket operations.
 type Option func(o *Opts)
 
+type delayHow int
+
+const (
+	delayUnset delayHow = iota
+	delayFixed
+	delayExponential
+)
+
+type DelayStrategy struct {
+	how         delayHow
+	fixed       *struct{ duration time.Duration }
+	exponential *struct {
+		base     float64
+		maxDelay time.Duration
+		jitter   time.Duration
+	}
+}
+
 // Opts contains options for ticket operations.
 type Opts struct {
 	// delay sets a delay before the ticket becomes eligible for processing.
-	delay time.Duration
+	delay DelayStrategy
 
 	// status sets the ticket's status.
 	status *status.Status
@@ -51,8 +69,26 @@ func WithErrorReason(reason any) Option {
 	}
 }
 
+func BackoffDelay(base float64, maxDelay time.Duration, jitter time.Duration) DelayStrategy {
+	return DelayStrategy{
+		how: delayExponential,
+		exponential: &struct {
+			base     float64
+			maxDelay time.Duration
+			jitter   time.Duration
+		}{base, maxDelay, jitter},
+	}
+}
+
+func FixedDelay(duration time.Duration) DelayStrategy {
+	return DelayStrategy{
+		how:   delayFixed,
+		fixed: &struct{ duration time.Duration }{duration},
+	}
+}
+
 // WithDelay sets a delay before the ticket becomes eligible for processing.
-func WithDelay(delay time.Duration) Option {
+func WithDelay(delay DelayStrategy) Option {
 	return func(o *Opts) {
 		o.delay = delay
 	}

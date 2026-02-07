@@ -33,6 +33,15 @@ type UpdateSet struct {
 	ErrorReason any
 }
 
+// TypeStats contains ticket counts by status for a specific type.
+type TypeStats struct {
+	Type      string
+	Pending   int64
+	Done      int64
+	Failed    int64
+	Cancelled int64
+}
+
 // Store defines the interface for ticket storage and management.
 // Implementations must be safe for concurrent use.
 type Store interface {
@@ -75,6 +84,9 @@ type Store interface {
 	// UpdateBatch modifies multiple tickets using the provided UpdateFunc.
 	// The UpdateFunc receives a pointer to each ticket to modify.
 	UpdateBatch(ctx context.Context, updates []UpdateSet) error
+
+	// GetStatsByType returns ticket counts grouped by type and status.
+	GetStatsByType(ctx context.Context) ([]TypeStats, error)
 }
 
 // PollResult contains the result of a store polling operation.

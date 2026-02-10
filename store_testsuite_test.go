@@ -601,10 +601,13 @@ func (s *StoreTestSuite) TestNotFoundHandler(t *testing.T) {
 
 	handlerCalled := atomic.Bool{}
 	var handlerError error
+	var errorMu sync.Mutex
 
 	router.NotFoundFunc(func(ctx context.Context, t *lymbo.Ticket) error {
-		handlerCalled.Store(true)
+		errorMu.Lock()
 		handlerError = lymbo.ErrHandlerNotFound
+		errorMu.Unlock()
+		handlerCalled.Store(true)
 		return kh.Ack(ctx, t.ID)
 	})
 
@@ -623,6 +626,8 @@ func (s *StoreTestSuite) TestNotFoundHandler(t *testing.T) {
 		return handlerCalled.Load()
 	}, 5*time.Second, 10*time.Millisecond)
 
+	errorMu.Lock()
+	defer errorMu.Unlock()
 	assert.ErrorIs(t, handlerError, lymbo.ErrHandlerNotFound)
 }
 

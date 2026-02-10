@@ -77,7 +77,12 @@ func updateOne(t *lymbo.Ticket, us lymbo.UpdateSet) {
 	if us.Nice != nil {
 		t.Nice = *us.Nice
 	}
-	if us.Runat != nil {
+	if us.Backoff != nil {
+		delay := time.Duration(math.Pow(us.Backoff.Base, float64(t.Attempts)) * float64(time.Second))
+		delay = min(delay, us.Backoff.MaxDelay)
+		delay += us.Backoff.Jitter
+		t.Runat = time.Now().Add(delay)
+	} else if us.Runat != nil {
 		t.Runat = *us.Runat
 	}
 	if us.Payload != nil {
@@ -119,29 +124,6 @@ func (m *Store) Update(ctx context.Context, tid lymbo.TicketId, fn lymbo.UpdateF
 	}
 
 	m.data[tid] = t
-	return nil
-}
-
-func (m *Store) UpdateSet(ctx context.Context, us lymbo.UpdateSet) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// exponential backoff support
-	if us.Backoff != nil {
-		delay := time.Duration(math.Pow(us.Backoff.Base, float64(m.data[us.Id].Attempts)))
-		delay = min(delay, us.Backoff.MaxDelay)
-		delay += us.Backoff.Jitter
-		newRunat := time.Now().Add(delay)
-		us.Runat = &newRunat
-	}
-
-	t, exists := m.data[us.Id]
-	if !exists {
-		return lymbo.ErrTicketNotFound
-	}
-
-	updateOne(&t, us)
-	m.data[us.Id] = t
 	return nil
 }
 
@@ -193,7 +175,7 @@ func (m *Store) PollPending(_ context.Context, req lymbo.PollRequest) (lymbo.Pol
 
 	// Update tickets with exponential backoff for next attempt.
 	for _, t := range ready {
-		delay := time.Duration(math.Pow(req.BackoffBase, float64(t.Attempts)))
+		delay := time.Duration(math.Pow(req.BackoffBase, float64(t.Attempts)) * float64(time.Second))
 		delay = min(delay, req.MaxBackoffDelay)
 		delay += req.TTR
 		t.Runat = req.Now.Add(delay)

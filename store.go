@@ -53,10 +53,6 @@ type Store interface {
 	// The UpdateFunc receives a pointer to the ticket to modify.
 	Update(context.Context, TicketId, UpdateFunc) error
 
-	// UpdateSet modifies an existing ticket using the provided UpdateSet.
-	// it does not fetch the ticket, the request is only Update.
-	UpdateSet(context.Context, UpdateSet) error
-
 	// PollPending retrieves pending tickets ready for processing.
 	// Returns up to limit tickets sorted by priority (Runat, then Nice).
 	// The backoffBase parameter controls the exponential backoff calculation.

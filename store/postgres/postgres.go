@@ -343,83 +343,6 @@ func (r *Tickets) Update(ctx context.Context, id lymbo.TicketId, fn lymbo.Update
 	return tx.Commit(ctx)
 }
 
-type updateSetParams struct {
-	id           uuid.UUID      // $1
-	status       sql.NullString // $2
-	nice         sql.NullInt16  // $3
-	runat        sql.NullTime   // $4
-	payload      []byte         // $5
-	error_reason []byte         // $6
-}
-
-func updateOne(tid uuid.UUID, us lymbo.UpdateSet) (*updateSetParams, error) {
-	usp := &updateSetParams{
-		id: tid,
-	}
-
-	if us.Status != nil {
-		usp.status = sql.NullString{String: us.Status.String(), Valid: true}
-	}
-	if us.Nice != nil {
-		usp.nice = sql.NullInt16{Int16: int16(*us.Nice), Valid: true}
-	}
-	if us.Runat != nil {
-		usp.runat = sql.NullTime{Time: *us.Runat, Valid: true}
-	}
-	if us.Payload != nil {
-		payload, err := json.Marshal(us.Payload)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal payload: %w", err)
-		}
-		usp.payload = payload
-	}
-	if us.ErrorReason != nil {
-		errorReason, err := json.Marshal(us.ErrorReason)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal error_reason: %w", err)
-		}
-		usp.error_reason = errorReason
-	}
-	return usp, nil
-}
-
-func (r *Tickets) UpdateSet(ctx context.Context, us lymbo.UpdateSet) error {
-	ticketUUID, err := uuid.Parse(us.Id.String())
-	if err != nil {
-		return lymbo.ErrTicketIDInvalid
-	}
-
-	usp, err := updateOne(ticketUUID, us)
-	if err != nil {
-		return err
-	}
-
-	switch {
-	case us.Backoff != nil:
-		_, err = r.db.Exec(ctx, r.queries.backoff,
-			usp.id,
-			usp.status,
-			usp.nice,
-			us.Backoff.Jitter.Milliseconds(),
-			us.Backoff.Base,
-			int32(us.Backoff.MaxDelay.Seconds()),
-			usp.payload,
-			usp.error_reason,
-		)
-	default:
-		_, err = r.db.Exec(ctx, r.queries.update,
-			usp.id,
-			usp.status,
-			usp.nice,
-			usp.runat,
-			usp.payload,
-			usp.error_reason,
-		)
-	}
-
-	return err
-}
-
 func (r *Tickets) UpdateBatch(ctx context.Context, updates []lymbo.UpdateSet) error {
 	if len(updates) == 0 {
 		return nil
@@ -432,19 +355,67 @@ func (r *Tickets) UpdateBatch(ctx context.Context, updates []lymbo.UpdateSet) er
 			return lymbo.ErrTicketIDInvalid
 		}
 
-		usp, err := updateOne(ticketUUID, us)
-		if err != nil {
-			return err
+		var q string
+		req := []any{ticketUUID}
+
+		// status as  $2
+		switch {
+		case us.Status != nil:
+			req = append(req, sql.NullString{String: us.Status.String(), Valid: true})
+		default:
+			req = append(req, sql.NullString{Valid: false})
 		}
 
-		batch.Queue(r.queries.update,
-			usp.id,
-			usp.status,
-			usp.nice,
-			usp.runat,
-			usp.payload,
-			usp.error_reason,
-		)
+		// nice as $3
+		switch {
+		case us.Nice != nil:
+			req = append(req, sql.NullInt16{Int16: int16(*us.Nice), Valid: true})
+		default:
+			req = append(req, sql.NullInt16{Valid: false})
+		}
+
+		// runat as $4, ...
+		switch {
+		case us.Backoff != nil:
+			q = r.queries.backoff
+			req = append(req,
+				us.Backoff.Jitter.Seconds(),
+				us.Backoff.Base,
+				us.Backoff.MaxDelay.Seconds(),
+			)
+		case us.Runat != nil:
+			q = r.queries.update
+			req = append(req, sql.NullTime{Time: *us.Runat, Valid: true})
+		default:
+			// do nothing, just instant retry
+			req = append(req, sql.NullTime{Valid: false})
+		}
+
+		// payload as $5
+		switch {
+		case us.Payload != nil:
+			payload, err := json.Marshal(us.Payload)
+			if err != nil {
+				return fmt.Errorf("failed to marshal payload: %w", err)
+			}
+			req = append(req, payload)
+		default:
+			req = append(req, nil)
+		}
+
+		// error_reason as $6
+		switch {
+		case us.ErrorReason != nil:
+			errorReason, err := json.Marshal(us.ErrorReason)
+			if err != nil {
+				return fmt.Errorf("failed to marshal error_reason: %w", err)
+			}
+			req = append(req, errorReason)
+		default:
+			req = append(req, nil)
+		}
+
+		batch.Queue(q, req...)
 	}
 
 	br := r.db.SendBatch(ctx, batch)
